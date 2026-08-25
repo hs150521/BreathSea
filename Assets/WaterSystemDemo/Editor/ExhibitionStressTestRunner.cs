@@ -8,6 +8,7 @@ public static class ExhibitionStressTestRunner
     const string SessionKey = "BreathSea.ExhibitionStressTest";
     static readonly string RequestPath = Path.Combine(Directory.GetParent(Application.dataPath).FullName, "Temp", "run-exhibition-stress-test.flag");
     static double testStartTime;
+    static double previousStepTime;
     static int testStartFrame;
     static bool capturedQuiet;
     static bool capturedShortPeak;
@@ -54,6 +55,11 @@ public static class ExhibitionStressTestRunner
         if (!SessionState.GetBool(SessionKey, false))
             return;
 
+        // A paused Editor still accepts Camera.Render(), which used to produce
+        // misleading zero-input captures. This runner owns the temporary play
+        // session, so it can explicitly resume before sampling the simulator.
+        EditorApplication.isPaused = false;
+
         BreathToWater controller = Object.FindFirstObjectByType<BreathToWater>();
         if (controller == null)
         {
@@ -66,6 +72,7 @@ public static class ExhibitionStressTestRunner
         controller.StartStressTest();
         controller.showRuntimePanel = false;
         testStartTime = EditorApplication.timeSinceStartup;
+        previousStepTime = testStartTime;
         testStartFrame = Time.frameCount;
         capturedQuiet = false;
         capturedShortPeak = false;
@@ -83,6 +90,13 @@ public static class ExhibitionStressTestRunner
         }
 
         double elapsed = EditorApplication.timeSinceStartup - testStartTime;
+        BreathToWater controller = Object.FindFirstObjectByType<BreathToWater>();
+        if (controller != null)
+        {
+            float deltaTime = (float)(EditorApplication.timeSinceStartup - previousStepTime);
+            controller.AdvanceStressTest((float)elapsed, Mathf.Clamp(deltaTime, 0.001f, 0.1f));
+        }
+        previousStepTime = EditorApplication.timeSinceStartup;
         if (!capturedQuiet && elapsed >= 0.8)
         {
             CaptureStressFrame("WaterStressTest-Quiet.png");

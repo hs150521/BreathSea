@@ -11,22 +11,60 @@ using UnityEngine.Rendering.HighDefinition;
 [DefaultExecutionOrder(20)]
 public sealed class ContinuousOceanClipmap : MonoBehaviour
 {
-    static readonly Vector2[] WaveDirections =
+    const int WaveCount = 24;
+
+    struct WaveComponent
     {
-        new Vector2(0.88f, 0.47f), new Vector2(0.61f, 0.79f), new Vector2(-0.18f, 0.98f),
-        new Vector2(-0.71f, 0.70f), new Vector2(0.98f, -0.20f), new Vector2(0.39f, -0.92f),
-        new Vector2(-0.84f, -0.54f), new Vector2(-0.42f, 0.91f), new Vector2(0.22f, 0.98f),
-        new Vector2(0.77f, -0.64f)
-    };
-    static readonly float[] Wavelengths = { 185f, 118f, 76f, 49f, 31f, 20f, 13f, 8.2f, 5.3f, 3.4f };
-    static readonly float[] Amplitudes = { 0.82f, 0.54f, 0.34f, 0.21f, 0.13f, 0.08f, 0.050f, 0.030f, 0.018f, 0.011f };
-    static readonly float[] Phases = { 0.2f, 1.4f, 2.9f, 4.7f, 5.6f, 0.8f, 3.6f, 2.1f, 5.0f, 1.1f };
+        public Vector2 direction;
+        public Vector2 groupDirection;
+        public float wavelength;
+        public float amplitude;
+        public float phase;
+        public float groupPhase;
+    }
+
+    static readonly WaveComponent[] Waves = CreateWaveSet();
     static readonly Vector2[] DetailDirections =
     {
         new Vector2(3f, 7f), new Vector2(-8f, 5f), new Vector2(11f, -4f),
         new Vector2(17f, 9f), new Vector2(-13f, 16f), new Vector2(23f, -11f)
     };
     static readonly float[] DetailWeights = { 0.62f, 0.43f, 0.29f, 0.18f, 0.11f, 0.07f };
+
+    static WaveComponent[] CreateWaveSet()
+    {
+        WaveComponent[] components = new WaveComponent[WaveCount];
+        for (int i = 0; i < components.Length; i++)
+        {
+            float normalizedIndex = i / (float)(components.Length - 1);
+            float wavelength = 3.1f * Mathf.Pow(1.2f, i);
+            float spread = Mathf.Lerp(0.38f, 2.4f, normalizedIndex);
+            float centre = 0.56f + (i % 6 == 0 ? 1.18f : 0f);
+            float angle = centre + (Hash01(i * 19 + 7) - 0.5f) * spread;
+            float groupAngle = angle + (Hash01(i * 29 + 11) - 0.5f) * 1.0f;
+            components[i] = new WaveComponent
+            {
+                direction = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)),
+                groupDirection = new Vector2(Mathf.Cos(groupAngle), Mathf.Sin(groupAngle)),
+                wavelength = wavelength,
+                amplitude = 0.00185f * Mathf.Pow(wavelength, 1.05f),
+                phase = Hash01(i * 43 + 5) * Mathf.PI * 2f,
+                groupPhase = Hash01(i * 61 + 17) * Mathf.PI * 2f
+            };
+        }
+        return components;
+    }
+
+    static float Hash01(int value)
+    {
+        uint hash = (uint)value;
+        hash ^= hash >> 16;
+        hash *= 0x7feb352du;
+        hash ^= hash >> 15;
+        hash *= 0x846ca68bu;
+        hash ^= hash >> 16;
+        return (hash & 0x00ffffffu) / 16777215f;
+    }
     [Header("References")]
     public Transform referenceCamera;
     public WaterSurface originalWater;
@@ -50,7 +88,6 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
 
     Mesh mesh;
     Material material;
-    GpuOceanSpectrum spectrum;
     MeshRenderer meshRenderer;
     Vector3[] vertices;
     Vector3[] normals;
@@ -159,14 +196,11 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
         material = new Material(shader) { name = "Continuous Multi-Scale Ocean Material" };
         material.SetColor("_BaseColor", new Color(0.018f, 0.11f, 0.14f, 1f));
         material.SetFloat("_Metallic", 0f);
-        material.SetFloat("_Smoothness", 0.72f);
-        spectrum = GetComponent<GpuOceanSpectrum>();
-        if (spectrum == null) spectrum = gameObject.AddComponent<GpuOceanSpectrum>();
-        spectrum.Configure(referenceCamera);
-        material.SetTexture("_NormalMap", spectrum.normalFoamTexture);
-        material.SetTextureScale("_NormalMap", new Vector2(42f, 37f));
-        material.SetFloat("_NormalScale", 0.8f);
-        material.EnableKeyword("_NORMALMAP");
+        material.SetFloat("_Smoothness", 0.76f);
+        // The previous 512px normal was tiled dozens of times over the clipmap.
+        // That made a procedural normal field read as visible, evenly spaced bands.
+        // Geometric normals already contain the full wave hierarchy and stay coupled
+        // to its displacement, so leave the material free of repeated texture detail.
         meshRenderer.sharedMaterial = material;
         meshRenderer.enabled = !useHdrpWaterRenderer;
         meshRenderer.shadowCastingMode = ShadowCastingMode.Off;
@@ -179,8 +213,6 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
     void LateUpdate()
     {
         UpdateSurface();
-        if (spectrum != null)
-            spectrum.audioEnergy = audioEnergy;
     }
 
     void ConfigureWaterRenderer()
@@ -273,25 +305,27 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
         Vector3 binormal = Vector3.forward;
         float time = Time.time;
 
-        for (int i = 0; i < WaveDirections.Length; i++)
+        for (int i = 0; i < Waves.Length; i++)
         {
-            Vector2 direction = WaveDirections[i];
-            float waveNumber = Mathf.PI * 2f / Wavelengths[i];
-            float groupPhase = Vector2.Dot(new Vector2(0.011f + i * 0.0017f, -0.009f + i * 0.0013f), new Vector2(world.x, world.z)) + Phases[(i + 3) % Phases.Length];
-            float groupEnvelope = 0.62f + 0.38f * (0.5f + 0.5f * Mathf.Sin(groupPhase));
-            float amplitude = Amplitudes[i] * energy * groupEnvelope;
-            float phase = waveNumber * Vector2.Dot(direction, new Vector2(world.x, world.z)) + Mathf.Sqrt(9.81f * waveNumber) * time + Phases[i];
-            float steepness = Mathf.Min(0.48f, 0.22f / Mathf.Max(0.02f, waveNumber * amplitude * WaveDirections.Length));
+            WaveComponent wave = Waves[i];
+            float waveNumber = Mathf.PI * 2f / wave.wavelength;
+            Vector2 worldXZ = new Vector2(world.x, world.z);
+            float groupA = Mathf.Sin(Vector2.Dot(wave.groupDirection, worldXZ) * (0.018f + i * 0.0009f) + wave.groupPhase + time * 0.11f);
+            float groupB = Mathf.Sin(Vector2.Dot(wave.direction, worldXZ) * (0.007f + i * 0.00035f) + wave.phase * 1.7f - time * 0.07f);
+            float groupEnvelope = Mathf.Lerp(0.42f, 1f, 0.5f + 0.32f * groupA + 0.18f * groupB);
+            float amplitude = wave.amplitude * energy * groupEnvelope;
+            float phase = waveNumber * Vector2.Dot(wave.direction, worldXZ) + Mathf.Sqrt(9.81f * waveNumber) * time + wave.phase;
+            float steepness = Mathf.Min(0.46f, 0.19f / Mathf.Max(0.02f, waveNumber * amplitude * Waves.Length));
             float sine = Mathf.Sin(phase);
             float cosine = Mathf.Cos(phase);
             float horizontal = steepness * amplitude;
 
-            position.x += direction.x * horizontal * cosine;
-            position.z += direction.y * horizontal * cosine;
+            position.x += wave.direction.x * horizontal * cosine;
+            position.z += wave.direction.y * horizontal * cosine;
             position.y += amplitude * sine;
 
-            tangent += new Vector3(-direction.x * direction.x * steepness * amplitude * waveNumber * sine, direction.x * amplitude * waveNumber * cosine, -direction.x * direction.y * steepness * amplitude * waveNumber * sine);
-            binormal += new Vector3(-direction.x * direction.y * steepness * amplitude * waveNumber * sine, direction.y * amplitude * waveNumber * cosine, -direction.y * direction.y * steepness * amplitude * waveNumber * sine);
+            tangent += new Vector3(-wave.direction.x * wave.direction.x * steepness * amplitude * waveNumber * sine, wave.direction.x * amplitude * waveNumber * cosine, -wave.direction.x * wave.direction.y * steepness * amplitude * waveNumber * sine);
+            binormal += new Vector3(-wave.direction.x * wave.direction.y * steepness * amplitude * waveNumber * sine, wave.direction.y * amplitude * waveNumber * cosine, -wave.direction.y * wave.direction.y * steepness * amplitude * waveNumber * sine);
         }
 
         normal = Vector3.Cross(binormal, tangent).normalized;
@@ -331,7 +365,7 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
         float derivative = 0f;
         for (int i = 0; i < DetailDirections.Length; i++)
         {
-            float phase = Mathf.PI * 2f * (DetailDirections[i].x * u + DetailDirections[i].y * v) + Phases[i];
+            float phase = Mathf.PI * 2f * (DetailDirections[i].x * u + DetailDirections[i].y * v + Hash01(i * 73 + 2));
             derivative += DetailWeights[i] * Mathf.PI * 2f * (xAxis ? DetailDirections[i].x : DetailDirections[i].y) * Mathf.Cos(phase);
         }
         return derivative;

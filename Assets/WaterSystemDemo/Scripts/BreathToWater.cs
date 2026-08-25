@@ -234,6 +234,11 @@ public class BreathToWater : MonoBehaviour
 
     void Start()
     {
+        // The exhibition can briefly lose foreground focus when the operator uses
+        // the control panel. Keep microphone response and the automated stress run
+        // advancing rather than capturing a frozen frame.
+        Application.runInBackground = true;
+
         if (water == null)
         {
             Debug.LogError("BreathToWater: Water Surface is not assigned.");
@@ -255,9 +260,7 @@ public class BreathToWater : MonoBehaviour
         LoadRuntimeSettings();
         LiftWaterDatumForShoreline();
         ApplyExhibitionWaterLook();
-        SetupGpuOceanDetail();
         ConfigureWaterDecals();
-        SetupSpectralOceanDeformer();
         SetupNativeAudioWaveDecals();
         SetupSpatialCurrentVariation();
         SetupProceduralNearOcean();
@@ -279,29 +282,54 @@ public class BreathToWater : MonoBehaviour
         if (Input.GetKeyDown(testPulseKey))
             StartTravelingPulse(1f);
 
-        rawMicLevel = GetAudioLevel(out peakMicLevel);
+        float inputLevel = GetAudioLevel(out float inputPeak);
+        ApplyInputLevel(inputLevel, inputPeak, Time.deltaTime, true);
+    }
+
+    void ApplyInputLevel(float inputLevel, float inputPeak, float deltaTime, bool updateLocalEffects)
+    {
+        rawMicLevel = inputLevel;
+        peakMicLevel = inputPeak;
         maxRawMicLevel = Mathf.Max(maxRawMicLevel, rawMicLevel);
 
         float normalized = Mathf.InverseLerp(noiseFloor, Mathf.Max(noiseFloor + 0.0001f, breathCeiling), rawMicLevel);
         normalized = Mathf.Clamp01(normalized * breathGain);
 
         float envelopeSpeed = normalized > smoothedSound ? attackSpeed : releaseSpeed;
-        smoothedSound = Mathf.Lerp(smoothedSound, normalized, 1f - Mathf.Exp(-envelopeSpeed * Time.deltaTime));
+        smoothedSound = Mathf.Lerp(smoothedSound, normalized, 1f - Mathf.Exp(-envelopeSpeed * Mathf.Max(0.0001f, deltaTime)));
         breathValue = smoothedSound;
 
         float baseWave = Mathf.Clamp01(Mathf.Pow(breathValue, Mathf.Max(0.05f, responseCurve)));
         waveValue = baseWave;
 
-        TryTriggerTravelingPulse(baseWave);
-        UpdateTravelingPulses();
-        UpdateNativeAudioWaveDecals();
-        UpdateDelayedGlobalWave(baseWave);
-        UpdateSlowSwell(delayedGlobalWave);
+        if (updateLocalEffects)
+        {
+            TryTriggerTravelingPulse(baseWave);
+            UpdateTravelingPulses();
+            UpdateNativeAudioWaveDecals();
+            UpdateSlowSwell(delayedGlobalWave);
+            UpdateSpectralOceanDeformer(delayedGlobalWave);
+            UpdateProceduralNearOcean(delayedGlobalWave);
+        }
+
+        float globalSpeed = baseWave > smoothedGlobalWave ? globalAttackSpeed : globalReleaseSpeed;
+        smoothedGlobalWave = Mathf.Lerp(smoothedGlobalWave, baseWave, 1f - Mathf.Exp(-globalSpeed * Mathf.Max(0.0001f, deltaTime)));
+        delayedGlobalWave = smoothedGlobalWave;
         ApplyGlobalWater(delayedGlobalWave);
-        UpdateSpectralOceanDeformer(delayedGlobalWave);
-        UpdateProceduralNearOcean(delayedGlobalWave);
         if (continuousOcean != null)
             continuousOcean.audioEnergy = delayedGlobalWave;
+    }
+
+    public void AdvanceStressTest(float elapsedSeconds, float deltaTime)
+    {
+        float input;
+        if (elapsedSeconds < 1.5f) input = 0.003f;
+        else if (elapsedSeconds < 1.8f) input = 0.055f;
+        else if (elapsedSeconds < 3.5f) input = 0.012f + Mathf.Sin(elapsedSeconds * 12f) * 0.003f;
+        else if (elapsedSeconds < 4.2f) input = 0.07f;
+        else if (elapsedSeconds < 6.5f) input = 0.004f;
+        else input = 0.028f;
+        ApplyInputLevel(input, input, deltaTime, false);
     }
 
     public void SelectMicrophone(string deviceName)
@@ -420,11 +448,12 @@ public class BreathToWater : MonoBehaviour
         pulseLength = 108f;
         useNativeAudioWaveDecals = false;
         useProceduralNearOcean = false;
-        // The direct GPU mesh remains an isolated experiment until its displacement,
-        // normal, and foam outputs are consumed by one HDRP Water Shader Graph.
-        // Keep the stable HDRP-water rendering path active for normal exhibition runs.
+        // Keep one coherent HDRP spectrum. The former normal-map, static deformation,
+        // and current-decal overlays each had an independent periodic domain; their
+        // interference was the source of the visible blocks and evenly spaced bands.
         useRecordedOceanFallback = false;
         useContinuousOceanReplacement = false;
+        useSpatialCurrentVariation = false;
         Material exhibitionOceanMaterial = Resources.Load<Material>("ExhibitionOcean/Materials/Ocean");
         if (exhibitionOceanMaterial != null)
             water.customMaterial = exhibitionOceanMaterial;
@@ -437,7 +466,7 @@ public class BreathToWater : MonoBehaviour
         nativeWaveLength = 13f;
         globalAttackSpeed = 0.32f;
         globalReleaseSpeed = 0.09f;
-        maximumLargeBandMultiplier = Mathf.Max(maximumLargeBandMultiplier, 0.92f);
+        maximumLargeBandMultiplier = Mathf.Min(maximumLargeBandMultiplier, 0.72f);
         calmDistantWindSpeed = 28f;
         calmFirstBand = 0.62f;
         calmSecondBand = 0.35f;
@@ -451,10 +480,10 @@ public class BreathToWater : MonoBehaviour
         // Keep the three HDRP bands in distinct jobs.  The swell is directional
         // enough to read as a body of water, the middle band gives it cross-seas,
         // and the ripples only resolve close to the viewer.
-        water.repetitionSize = 1180f;
+        water.repetitionSize = 1850f;
         water.largeOrientationValue = largeWaveDirection;
         water.largeWindSpeed = 34f;
-        water.largeChaos = 0.68f;
+        water.largeChaos = 0.92f;
         water.largeBand0FadeMode = WaterSurface.FadeMode.Custom;
         water.largeBand0FadeStart = 560f;
         water.largeBand0FadeDistance = 1280f;
@@ -465,7 +494,7 @@ public class BreathToWater : MonoBehaviour
         water.ripplesMotionMode = WaterPropertyOverrideMode.Custom;
         water.ripplesOrientationValue = rippleDirection;
         water.ripplesWindSpeed = 5.2f;
-        water.ripplesChaos = 0.82f;
+        water.ripplesChaos = 0.96f;
         water.ripplesFadeMode = WaterSurface.FadeMode.Custom;
         water.ripplesFadeStart = 18f;
         water.ripplesFadeDistance = 82f;
@@ -1042,8 +1071,11 @@ public class BreathToWater : MonoBehaviour
         // Do not change wind speed, chaos, orientation, repetition size, or ripple speed
         // here. Any of those invalidates HDRP's FFT and recreates the surface every frame.
         float seaState = Mathf.SmoothStep(0f, 1f, delayedWave);
-        water.largeBand0Multiplier = Mathf.Lerp(0.76f, maximumLargeBandMultiplier, seaState);
-        water.largeBand1Multiplier = Mathf.Lerp(0.44f, 0.68f, seaState);
+        // Keep the largest wavelength below the point where a low exhibition camera
+        // turns it into an evenly spaced stripe pattern. Audio energy remains clear
+        // in the middle band, foam, and changing reflection instead.
+        water.largeBand0Multiplier = Mathf.Lerp(0.48f, maximumLargeBandMultiplier, seaState);
+        water.largeBand1Multiplier = Mathf.Lerp(0.32f, 0.56f, seaState);
         water.timeMultiplier = 0.86f;
         water.simulationFoamAmount = Mathf.Lerp(0.25f, 0.36f, Mathf.Clamp01(seaState * foamInfluence));
         if (continuousOcean != null)
@@ -1131,6 +1163,7 @@ public class BreathToWater : MonoBehaviour
         continuousOcean = GetComponent<ContinuousOceanClipmap>();
         if (continuousOcean == null)
             continuousOcean = gameObject.AddComponent<ContinuousOceanClipmap>();
+        continuousOcean.useHdrpWaterRenderer = false;
         continuousOcean.Configure(referenceCamera, water);
         continuousOcean.enabled = true;
     }
