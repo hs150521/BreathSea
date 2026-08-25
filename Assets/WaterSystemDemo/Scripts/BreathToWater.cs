@@ -1182,6 +1182,7 @@ public class BreathToWater : MonoBehaviour
         GameObject videoSurface = GameObject.CreatePrimitive(PrimitiveType.Quad);
         videoSurface.name = "Exhibition Recorded Ocean";
         RealOceanVideoSurface recordedOcean = videoSurface.AddComponent<RealOceanVideoSurface>();
+        recordedOcean.videoFileName = "kuriats-ocean-surface.mp4";
         recordedOcean.referenceCamera = referenceCamera;
         recordedOcean.controller = this;
         water.enabled = false;

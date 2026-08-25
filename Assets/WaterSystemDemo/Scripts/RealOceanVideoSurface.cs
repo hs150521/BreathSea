@@ -34,11 +34,8 @@ public sealed class RealOceanVideoSurface : MonoBehaviour
         material = new Material(shader) { name = "Recorded Ocean Surface" };
         material.SetTexture("_UnlitColorMap", texture);
         material.SetFloat("_ExposureWeight", 1f);
-        // Crop away the source shoreline foreground. The visible surface becomes a
-        // continuous real-water field while retaining enough horizon motion to read
-        // as a large ocean from the exhibition camera.
-        material.SetTextureScale("_UnlitColorMap", new Vector2(0.48f, 0.65f));
-        material.SetTextureOffset("_UnlitColorMap", new Vector2(0.02f, 0.35f));
+        material.SetTextureScale("_UnlitColorMap", Vector2.one);
+        material.SetTextureOffset("_UnlitColorMap", Vector2.zero);
         GetComponent<MeshRenderer>().sharedMaterial = material;
         GetComponent<MeshRenderer>().shadowCastingMode = ShadowCastingMode.Off;
         GetComponent<MeshRenderer>().receiveShadows = false;
