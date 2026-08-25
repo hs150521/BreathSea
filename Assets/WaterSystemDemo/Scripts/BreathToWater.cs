@@ -129,8 +129,8 @@ public class BreathToWater : MonoBehaviour
     [Range(0f, 1f)] public float nearWaterSmoothness = 0.82f;
     [Range(0f, 1f)] public float farWaterSmoothness = 0.56f;
     [Tooltip("Raises the fixed exhibition viewpoint so local wave groups do not collapse into horizon stripes.")]
-    public float exhibitionCameraHeightOffset = 0.45f;
-    public float exhibitionCameraPitchDown = 1.2f;
+    public float exhibitionCameraHeightOffset = 1.35f;
+    public float exhibitionCameraPitchDown = 3.2f;
 
     [Header("Calm Ocean")]
     public float calmDistantWindSpeed = 28f;
@@ -454,11 +454,10 @@ public class BreathToWater : MonoBehaviour
         useRecordedOceanFallback = false;
         useContinuousOceanReplacement = false;
         useSpatialCurrentVariation = false;
-        Material exhibitionOceanMaterial = Resources.Load<Material>("ExhibitionOcean/Materials/Ocean");
-        if (exhibitionOceanMaterial != null)
-            water.customMaterial = exhibitionOceanMaterial;
-        else
-            Debug.LogError("BreathToWater: Exhibition Ocean material is missing.");
+        // The copied graph has no authored inputs of its own. Let HDRP use its native
+        // Water material so the reflection and micro-normal paths remain coupled to
+        // the active simulation instead of to a duplicate graph asset.
+        water.customMaterial = null;
         nativeWaveAmplitude = 0.38f;
         nativeWaveNearDistance = 10f;
         nativeWaveFarDistance = 36f;
@@ -488,16 +487,19 @@ public class BreathToWater : MonoBehaviour
         water.largeBand0FadeStart = 560f;
         water.largeBand0FadeDistance = 1280f;
         water.largeBand1FadeMode = WaterSurface.FadeMode.Custom;
-        water.largeBand1FadeStart = 130f;
-        water.largeBand1FadeDistance = 460f;
+        // The middle band is useful near the shore but becomes a row of parallel
+        // horizon stripes at this fixed low camera angle. Fade it before it reaches
+        // the far field; the large band then carries the distant sea state alone.
+        water.largeBand1FadeStart = 34f;
+        water.largeBand1FadeDistance = 96f;
         water.ripples = true;
         water.ripplesMotionMode = WaterPropertyOverrideMode.Custom;
         water.ripplesOrientationValue = rippleDirection;
         water.ripplesWindSpeed = 5.2f;
         water.ripplesChaos = 0.96f;
         water.ripplesFadeMode = WaterSurface.FadeMode.Custom;
-        water.ripplesFadeStart = 18f;
-        water.ripplesFadeDistance = 82f;
+        water.ripplesFadeStart = 7f;
+        water.ripplesFadeDistance = 26f;
         rippleInfluence = Mathf.Min(rippleInfluence, 0.7f);
 
         // Runtime audio decals are spawned relative to the viewing camera. Keep HDRP's
