@@ -451,7 +451,7 @@ public class BreathToWater : MonoBehaviour
         // Keep one coherent HDRP spectrum. The former normal-map, static deformation,
         // and current-decal overlays each had an independent periodic domain; their
         // interference was the source of the visible blocks and evenly spaced bands.
-        useRecordedOceanFallback = false;
+        useRecordedOceanFallback = true;
         useContinuousOceanReplacement = false;
         useSpatialCurrentVariation = false;
         // The copied graph has no authored inputs of its own. Let HDRP use its native

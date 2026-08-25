@@ -34,6 +34,11 @@ public sealed class RealOceanVideoSurface : MonoBehaviour
         material = new Material(shader) { name = "Recorded Ocean Surface" };
         material.SetTexture("_UnlitColorMap", texture);
         material.SetFloat("_ExposureWeight", 1f);
+        // Crop away the source shoreline foreground. The visible surface becomes a
+        // continuous real-water field while retaining enough horizon motion to read
+        // as a large ocean from the exhibition camera.
+        material.SetTextureScale("_UnlitColorMap", new Vector2(0.48f, 0.65f));
+        material.SetTextureOffset("_UnlitColorMap", new Vector2(0.02f, 0.35f));
         GetComponent<MeshRenderer>().sharedMaterial = material;
         GetComponent<MeshRenderer>().shadowCastingMode = ShadowCastingMode.Off;
         GetComponent<MeshRenderer>().receiveShadows = false;
@@ -66,7 +71,13 @@ public sealed class RealOceanVideoSurface : MonoBehaviour
         float targetAspect = Mathf.Max(camera.aspect, (float)Screen.width / Mathf.Max(1, Screen.height));
         transform.localScale = new Vector3(height * targetAspect, height, 1f);
         if (player != null && player.isPrepared)
-            player.playbackSpeed = Mathf.Lerp(0.72f, 1.28f, controller != null ? controller.waveValue : 0f);
+        {
+            float energy = controller != null ? controller.waveValue : 0f;
+            // Input affects a real moving sea rather than a decorative overlay. A
+            // quiet room reads as slow swell; a strong voice creates visibly faster
+            // crest motion without distorting the filmed water.
+            player.playbackSpeed = Mathf.Lerp(0.55f, 1.75f, energy);
+        }
     }
 
     void OnDestroy()
