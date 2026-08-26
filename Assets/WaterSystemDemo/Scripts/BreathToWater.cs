@@ -35,7 +35,7 @@ public class BreathToWater : MonoBehaviour
     public bool useNativeAudioWaveDecals = false;
     [Range(1, 6)] public int nativeAudioWavePoolSize = 4;
     [Tooltip("The peak displacement of a loud microphone-triggered crest group, in metres.")]
-    public float nativeWaveAmplitude = 8f;
+    public float nativeWaveAmplitude = 1.4f;
     public float nativeWaveLifetime = 4.2f;
     public float nativeWaveNearDistance = 10f;
     public float nativeWaveFarDistance = 36f;
@@ -88,7 +88,7 @@ public class BreathToWater : MonoBehaviour
     [Header("Sound Response")]
     public float attackSpeed = 10f;
     public float releaseSpeed = 1.1f;
-    public float responseCurve = 0.75f;
+    public float responseCurve = 1.5f;
 
     [Header("Pulse Trigger")]
     [Range(0f, 1f)] public float pulseThreshold = 0.32f;
@@ -108,7 +108,7 @@ public class BreathToWater : MonoBehaviour
 
     [Header("Water Safety")]
     [Tooltip("Upper displacement multiplier for the broad HDRP swell. Values above 1 are intentionally theatrical.")]
-    [Range(0.1f, 6f)] public float maximumLargeBandMultiplier = 5f;
+    [Range(0.1f, 1.5f)] public float maximumLargeBandMultiplier = 1.25f;
     [Range(0f, 1f)] public float rippleInfluence = 1f;
     [Range(0f, 1f)] public float foamInfluence = 0.75f;
 
@@ -121,7 +121,7 @@ public class BreathToWater : MonoBehaviour
     public bool disableStaticSceneDeformation = true;
     [Range(0f, 1f)] public float maximumWaterDecalDepression = 0.15f;
     [Tooltip("Positive lift cap for local audio wave decals, in metres.")]
-    [Range(0f, 10f)] public float maximumWaterDecalLift = 9f;
+    [Range(0f, 2f)] public float maximumWaterDecalLift = 1.25f;
 
     [Header("Exhibition Water Look")]
     [Tooltip("Applies a less directional, less mirror-like ocean treatment at runtime.")]
@@ -457,17 +457,17 @@ public class BreathToWater : MonoBehaviour
         // Water material so the reflection and micro-normal paths remain coupled to
         // the active simulation instead of to a duplicate graph asset.
         water.customMaterial = null;
-        // Loud inputs are intentionally exaggerated for the children's exhibition:
-        // local crest groups can rise into the upper quarter of the authored view.
-        nativeWaveAmplitude = Mathf.Max(nativeWaveAmplitude, 8f);
-        maximumWaterDecalLift = Mathf.Max(maximumWaterDecalLift, 9f);
+        // Loud inputs remain visibly strong, but leave clearance below the fixed camera.
+        responseCurve = Mathf.Max(responseCurve, 1.5f);
+        nativeWaveAmplitude = Mathf.Min(Mathf.Max(nativeWaveAmplitude, 1.1f), 1.6f);
+        maximumWaterDecalLift = Mathf.Min(Mathf.Max(maximumWaterDecalLift, 1.1f), 1.4f);
         nativeWaveNearDistance = 10f;
         nativeWaveFarDistance = 36f;
-        nativeWaveWidth = 42f;
-        nativeWaveLength = 34f;
+        nativeWaveWidth = 24f;
+        nativeWaveLength = 22f;
         globalAttackSpeed = 0.32f;
         globalReleaseSpeed = 0.09f;
-        maximumLargeBandMultiplier = Mathf.Max(maximumLargeBandMultiplier, 5f);
+        maximumLargeBandMultiplier = Mathf.Min(Mathf.Max(maximumLargeBandMultiplier, 1.1f), 1.3f);
         calmDistantWindSpeed = 28f;
         calmFirstBand = 0.62f;
         calmSecondBand = 0.35f;
@@ -1035,6 +1035,11 @@ public class BreathToWater : MonoBehaviour
         if (nativeWaveSlots == null)
             return;
 
+        // Never allow a runtime F8 adjustment or a persisted value to lift a crest
+        // through the authored camera. Keep a small visual clearance below the lens.
+        float cameraLiftLimit = GetCameraLiftLimit();
+        maximumWaterDecalLift = Mathf.Min(maximumWaterDecalLift, cameraLiftLimit);
+
         for (int i = 0; i < nativeWaveSlots.Length; i++)
         {
             NativeWaveSlot slot = nativeWaveSlots[i];
@@ -1071,6 +1076,15 @@ public class BreathToWater : MonoBehaviour
         }
     }
 
+    float GetCameraLiftLimit()
+    {
+        if (referenceCamera == null || water == null)
+            return maximumWaterDecalLift;
+
+        float clearance = referenceCamera.position.y - water.transform.position.y;
+        return Mathf.Max(0.2f, clearance - 0.35f);
+    }
+
     void UpdateSlowSwell(float baseWave)
     {
         float swellSpeed = Mathf.Lerp(slowSwellMinSpeed, slowSwellMaxSpeed, baseWave);
@@ -1088,8 +1102,9 @@ public class BreathToWater : MonoBehaviour
         // Keep the largest wavelength below the point where a low exhibition camera
         // turns it into an evenly spaced stripe pattern. Audio energy remains clear
         // in the middle band, foam, and changing reflection instead.
-        water.largeBand0Multiplier = Mathf.Lerp(0.30f, maximumLargeBandMultiplier, seaState);
-        water.largeBand1Multiplier = Mathf.Lerp(0.18f, 3.4f, seaState);
+        float safeGlobalCap = Mathf.Min(maximumLargeBandMultiplier, 1.3f);
+        water.largeBand0Multiplier = Mathf.Lerp(0.30f, safeGlobalCap, seaState);
+        water.largeBand1Multiplier = Mathf.Lerp(0.18f, 0.95f, seaState);
         water.timeMultiplier = 0.86f;
         water.simulationFoamAmount = Mathf.Lerp(0.16f, 0.48f, Mathf.Clamp01(seaState * foamInfluence));
         if (continuousOcean != null)
@@ -1296,9 +1311,9 @@ public class BreathToWater : MonoBehaviour
         releaseSpeed = DrawSlider("Return speed", releaseSpeed, 0.1f, 5f);
         responseCurve = DrawSlider("Wave curve", responseCurve, 0.3f, 2f);
         pulseThreshold = DrawSlider("Pulse threshold", pulseThreshold, 0.05f, 1f);
-        maximumLargeBandMultiplier = DrawSlider("Wave height cap", maximumLargeBandMultiplier, 0.1f, 6f);
-        nativeWaveAmplitude = DrawSlider("Loud crest amplitude", nativeWaveAmplitude, 0f, 10f);
-        maximumWaterDecalLift = DrawSlider("Crest lift cap", maximumWaterDecalLift, 0f, 10f);
+        maximumLargeBandMultiplier = DrawSlider("Wave height cap", maximumLargeBandMultiplier, 0.1f, 1.5f);
+        nativeWaveAmplitude = DrawSlider("Loud crest amplitude", nativeWaveAmplitude, 0f, 2f);
+        maximumWaterDecalLift = DrawSlider("Crest lift cap", maximumWaterDecalLift, 0f, 2f);
 
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Save on this computer")) SaveRuntimeSettings();
