@@ -1036,7 +1036,8 @@ public class BreathToWater : MonoBehaviour
             return;
 
         // Never allow a runtime F8 adjustment or a persisted value to lift a crest
-        // through the authored camera. Keep a small visual clearance below the lens.
+        // through the authored camera. The safety margin is intentionally zero here
+        // so the loud state can use the full available vertical range.
         float cameraLiftLimit = GetCameraLiftLimit();
         maximumWaterDecalLift = Mathf.Min(maximumWaterDecalLift, cameraLiftLimit);
 
@@ -1082,7 +1083,7 @@ public class BreathToWater : MonoBehaviour
             return maximumWaterDecalLift;
 
         float clearance = referenceCamera.position.y - water.transform.position.y;
-        return Mathf.Max(0.2f, clearance - 0.35f);
+        return Mathf.Max(0.2f, clearance);
     }
 
     void UpdateSlowSwell(float baseWave)
