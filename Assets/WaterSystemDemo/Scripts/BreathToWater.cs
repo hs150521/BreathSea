@@ -443,14 +443,14 @@ public class BreathToWater : MonoBehaviour
         maxPulseAmplitude = 0.5f;
         pulseWidth = 118f;
         pulseLength = 108f;
-        useNativeAudioWaveDecals = false;
+        useNativeAudioWaveDecals = true;
         useProceduralNearOcean = false;
         // Keep one coherent HDRP spectrum. The former normal-map, static deformation,
         // and current-decal overlays each had an independent periodic domain; their
         // interference was the source of the visible blocks and evenly spaced bands.
-        useRecordedOceanFallback = true;
+        useRecordedOceanFallback = false;
         useContinuousOceanReplacement = false;
-        useSpatialCurrentVariation = false;
+        useSpatialCurrentVariation = true;
         // The copied graph has no authored inputs of its own. Let HDRP use its native
         // Water material so the reflection and micro-normal paths remain coupled to
         // the active simulation instead of to a duplicate graph asset.
@@ -462,7 +462,7 @@ public class BreathToWater : MonoBehaviour
         nativeWaveLength = 13f;
         globalAttackSpeed = 0.32f;
         globalReleaseSpeed = 0.09f;
-        maximumLargeBandMultiplier = Mathf.Min(maximumLargeBandMultiplier, 0.72f);
+        maximumLargeBandMultiplier = Mathf.Min(maximumLargeBandMultiplier, 0.82f);
         calmDistantWindSpeed = 28f;
         calmFirstBand = 0.62f;
         calmSecondBand = 0.35f;
@@ -478,6 +478,10 @@ public class BreathToWater : MonoBehaviour
         // and the ripples only resolve close to the viewer.
         water.repetitionSize = 1850f;
         water.largeOrientationValue = largeWaveDirection;
+        // The exhibition is a sheltered sunset view, not an open-water gale. A
+        // lower spectral peak avoids resolving into repeated cross-screen crests at
+        // the fixed camera while high chaos keeps the remaining waves directionally
+        // spread instead of forming one parade of parallel bands.
         water.largeWindSpeed = 34f;
         water.largeChaos = 0.92f;
         water.largeBand0FadeMode = WaterSurface.FadeMode.Custom;
@@ -487,16 +491,16 @@ public class BreathToWater : MonoBehaviour
         // The middle band is useful near the shore but becomes a row of parallel
         // horizon stripes at this fixed low camera angle. Fade it before it reaches
         // the far field; the large band then carries the distant sea state alone.
-        water.largeBand1FadeStart = 34f;
-        water.largeBand1FadeDistance = 96f;
+        water.largeBand1FadeStart = 160f;
+        water.largeBand1FadeDistance = 420f;
         water.ripples = true;
         water.ripplesMotionMode = WaterPropertyOverrideMode.Custom;
         water.ripplesOrientationValue = rippleDirection;
         water.ripplesWindSpeed = 5.2f;
         water.ripplesChaos = 0.96f;
         water.ripplesFadeMode = WaterSurface.FadeMode.Custom;
-        water.ripplesFadeStart = 7f;
-        water.ripplesFadeDistance = 26f;
+        water.ripplesFadeStart = 38f;
+        water.ripplesFadeDistance = 210f;
         rippleInfluence = Mathf.Min(rippleInfluence, 0.7f);
 
         // Runtime audio decals are spawned relative to the viewing camera. Keep HDRP's
@@ -509,10 +513,10 @@ public class BreathToWater : MonoBehaviour
             cameraData.antialiasing = HDAdditionalCameraData.AntialiasingMode.SubpixelMorphologicalAntiAliasing;
 
         // Broad highlights need roughness variation in this low-sun composition.
-        water.startSmoothness = 0.77f;
-        water.endSmoothness = 0.67f;
-        water.smoothnessFadeStart = 18f;
-        water.smoothnessFadeDistance = 220f;
+        water.startSmoothness = 0.74f;
+        water.endSmoothness = 0.50f;
+        water.smoothnessFadeStart = 35f;
+        water.smoothnessFadeDistance = 350f;
 
         water.foamColor = new Color(0.86f, 0.9f, 0.88f, 1f);
         water.foamSmoothness = 0.2f;
@@ -833,42 +837,34 @@ public class BreathToWater : MonoBehaviour
             return;
         }
 
-        // These fields only bend the two swell bands.  Ripples stay in their
-        // continuous FFT coordinate space, preventing a local-current rectangle.
+        // One continuous field bends both large FFT bands across the entire visible
+        // sea. It avoids the obvious boundaries and conflicting directions created
+        // by several small overlapping current rectangles.
         water.supportLargeCurrent = true;
         water.largeCurrentRes = WaterSurface.WaterDecalRegionResolution.Resolution256;
         water.supportRipplesCurrent = false;
-        currentFlowDecals = new WaterDecal[5];
+        water.decalRegionSize = new Vector2(960f, 720f);
+        currentFlowDecals = new WaterDecal[1];
         Vector3 forward = referenceCamera.forward;
         forward.y = 0f;
         forward.Normalize();
-        Vector3 right = Vector3.Cross(Vector3.up, forward);
-        float[] forwardOffsets = { 24f, 58f, 94f, 132f, 176f };
-        float[] sideOffsets = { -46f, 31f, -18f, 52f, -38f };
-        float[] rotations = { 17f, -31f, 43f, -19f, 28f };
-        float[] widths = { 120f, 132f, 116f, 145f, 128f };
-        float[] lengths = { 92f, 108f, 118f, 126f, 112f };
+        GameObject obj = new GameObject("Exhibition Continuous Ocean Current");
+        obj.transform.SetParent(transform, false);
+        obj.transform.position = referenceCamera.position + forward * 310f;
+        obj.transform.position = new Vector3(obj.transform.position.x, water.transform.position.y, obj.transform.position.z);
+        obj.transform.rotation = Quaternion.Euler(0f, referenceCamera.eulerAngles.y + 18f, 0f);
 
-        for (int i = 0; i < currentFlowDecals.Length; i++)
-        {
-            GameObject obj = new GameObject("Exhibition Spatial Current " + i);
-            obj.transform.SetParent(transform, false);
-            obj.transform.position = referenceCamera.position + forward * forwardOffsets[i] + right * sideOffsets[i];
-            obj.transform.position = new Vector3(obj.transform.position.x, water.transform.position.y, obj.transform.position.z);
-            obj.transform.rotation = Quaternion.Euler(0f, referenceCamera.eulerAngles.y + rotations[i], 0f);
-
-            WaterDecal decal = obj.AddComponent<WaterDecal>();
-            decal.material = currentFlowMaterial;
-            decal.regionSize = new Vector2(widths[i], lengths[i]);
-            decal.resolution = new Vector2Int(64, 64);
-            decal.updateMode = CustomRenderTextureUpdateMode.OnLoad;
-            decal.amplitude = 0f;
-            decal.surfaceFoamDimmer = 0f;
-            decal.deepFoamDimmer = 0f;
-            decal.RequestUpdate();
-            currentFlowDecals[i] = decal;
-        }
-        Debug.Log("BreathToWater: Enabled 5 HDRP large-wave current regions.");
+        WaterDecal decal = obj.AddComponent<WaterDecal>();
+        decal.material = currentFlowMaterial;
+        decal.regionSize = new Vector2(920f, 680f);
+        decal.resolution = new Vector2Int(128, 128);
+        decal.updateMode = CustomRenderTextureUpdateMode.OnLoad;
+        decal.amplitude = 0f;
+        decal.surfaceFoamDimmer = 0f;
+        decal.deepFoamDimmer = 0f;
+        decal.RequestUpdate();
+        currentFlowDecals[0] = decal;
+        Debug.Log("BreathToWater: Enabled one continuous HDRP large-wave current field.");
     }
 
 
@@ -1050,6 +1046,12 @@ public class BreathToWater : MonoBehaviour
             float travel = Mathf.SmoothStep(0f, 1f, t);
             slot.decal.surfaceFoamDimmer = Mathf.Clamp01(slot.strength * envelope * 0.58f);
             slot.decal.deepFoamDimmer = 0f;
+            // Positive-only displacement preserves the raised shoreline clearance:
+            // a loud input adds a finite crest group rather than carving a trough
+            // that can expose the rocks under the authored water level.
+            slot.decal.amplitude = Mathf.Min(
+                maximumWaterDecalLift,
+                nativeWaveAmplitude * slot.strength * envelope * (0.9f + 0.1f * Mathf.Sin(slot.age * 5.1f)));
             slot.decal.transform.position = Vector3.Lerp(slot.start, slot.end, travel);
             float breathing = 1f + 0.07f * Mathf.Sin((slot.age + slot.textureIndex) * 2.3f);
             slot.decal.regionSize = new Vector2(nativeWaveWidth * slot.scale * breathing, nativeWaveLength * slot.scale * breathing);
@@ -1073,10 +1075,10 @@ public class BreathToWater : MonoBehaviour
         // Keep the largest wavelength below the point where a low exhibition camera
         // turns it into an evenly spaced stripe pattern. Audio energy remains clear
         // in the middle band, foam, and changing reflection instead.
-        water.largeBand0Multiplier = Mathf.Lerp(0.48f, maximumLargeBandMultiplier, seaState);
-        water.largeBand1Multiplier = Mathf.Lerp(0.32f, 0.56f, seaState);
+        water.largeBand0Multiplier = Mathf.Lerp(0.30f, maximumLargeBandMultiplier, seaState);
+        water.largeBand1Multiplier = Mathf.Lerp(0.18f, 0.62f, seaState);
         water.timeMultiplier = 0.86f;
-        water.simulationFoamAmount = Mathf.Lerp(0.25f, 0.36f, Mathf.Clamp01(seaState * foamInfluence));
+        water.simulationFoamAmount = Mathf.Lerp(0.16f, 0.48f, Mathf.Clamp01(seaState * foamInfluence));
         if (continuousOcean != null)
             continuousOcean.audioEnergy = seaState;
         if (gpuOceanSpectrum != null)
