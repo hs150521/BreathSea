@@ -34,7 +34,8 @@ public class BreathToWater : MonoBehaviour
     [Tooltip("Each sound carries a small, non-uniform foam crest group across the water without retuning the entire FFT ocean.")]
     public bool useNativeAudioWaveDecals = false;
     [Range(1, 6)] public int nativeAudioWavePoolSize = 4;
-    public float nativeWaveAmplitude = 0.38f;
+    [Tooltip("The peak displacement of a loud microphone-triggered crest group, in metres.")]
+    public float nativeWaveAmplitude = 8f;
     public float nativeWaveLifetime = 4.2f;
     public float nativeWaveNearDistance = 10f;
     public float nativeWaveFarDistance = 36f;
@@ -106,8 +107,8 @@ public class BreathToWater : MonoBehaviour
     [Range(0f, 1f)] public float delayedGlobalWave;
 
     [Header("Water Safety")]
-    [Tooltip("Caps the broad HDRP swell to keep troughs above the shoreline rocks.")]
-    [Range(0.1f, 1f)] public float maximumLargeBandMultiplier = 0.84f;
+    [Tooltip("Upper displacement multiplier for the broad HDRP swell. Values above 1 are intentionally theatrical.")]
+    [Range(0.1f, 6f)] public float maximumLargeBandMultiplier = 5f;
     [Range(0f, 1f)] public float rippleInfluence = 1f;
     [Range(0f, 1f)] public float foamInfluence = 0.75f;
 
@@ -119,7 +120,8 @@ public class BreathToWater : MonoBehaviour
     [Tooltip("Disables old static shoreline deformation decals that carve artificial holes into the water.")]
     public bool disableStaticSceneDeformation = true;
     [Range(0f, 1f)] public float maximumWaterDecalDepression = 0.15f;
-    [Range(0f, 1f)] public float maximumWaterDecalLift = 0.45f;
+    [Tooltip("Positive lift cap for local audio wave decals, in metres.")]
+    [Range(0f, 10f)] public float maximumWaterDecalLift = 9f;
 
     [Header("Exhibition Water Look")]
     [Tooltip("Applies a less directional, less mirror-like ocean treatment at runtime.")]
@@ -455,14 +457,17 @@ public class BreathToWater : MonoBehaviour
         // Water material so the reflection and micro-normal paths remain coupled to
         // the active simulation instead of to a duplicate graph asset.
         water.customMaterial = null;
-        nativeWaveAmplitude = 0.38f;
+        // Loud inputs are intentionally exaggerated for the children's exhibition:
+        // local crest groups can rise into the upper quarter of the authored view.
+        nativeWaveAmplitude = Mathf.Max(nativeWaveAmplitude, 8f);
+        maximumWaterDecalLift = Mathf.Max(maximumWaterDecalLift, 9f);
         nativeWaveNearDistance = 10f;
         nativeWaveFarDistance = 36f;
-        nativeWaveWidth = 15f;
-        nativeWaveLength = 13f;
+        nativeWaveWidth = 42f;
+        nativeWaveLength = 34f;
         globalAttackSpeed = 0.32f;
         globalReleaseSpeed = 0.09f;
-        maximumLargeBandMultiplier = Mathf.Min(maximumLargeBandMultiplier, 0.82f);
+        maximumLargeBandMultiplier = Mathf.Max(maximumLargeBandMultiplier, 5f);
         calmDistantWindSpeed = 28f;
         calmFirstBand = 0.62f;
         calmSecondBand = 0.35f;
@@ -812,6 +817,9 @@ public class BreathToWater : MonoBehaviour
             obj.transform.SetParent(transform, false);
             WaterDecal decal = obj.AddComponent<WaterDecal>();
             Material slotMaterial = new Material(nativeWaveMaterial) { name = "Audio Wave Packet " + i };
+            // HDRP's sample graph has its own height limiter. Keep it in step with
+            // the exhibition control rather than silently clamping a loud crest.
+            slotMaterial.SetFloat("_Max_Amplitude", maximumWaterDecalLift);
             decal.material = slotMaterial;
             decal.resolution = new Vector2Int(64, 64);
             decal.updateMode = CustomRenderTextureUpdateMode.Realtime;
@@ -962,7 +970,9 @@ public class BreathToWater : MonoBehaviour
         // group; its texture contains several oblique wavelengths rather than a ring.
         float lateralJitter = Mathf.Lerp(-18f, 18f, Mathf.PerlinNoise(pulseSequence * 3.17f, 0.41f));
         Vector3 right = Vector3.Cross(Vector3.up, forward);
-        float forwardDistance = Mathf.Lerp(nativeWaveNearDistance, nativeWaveFarDistance, Mathf.PerlinNoise(pulseSequence * 2.63f, 0.87f));
+        // Keep theatrical crests in the near field where their vertical motion reads
+        // clearly at the authored fixed camera angle.
+        float forwardDistance = Mathf.Lerp(6f, 16f, Mathf.PerlinNoise(pulseSequence * 2.63f, 0.87f));
         slot.start = origin + forward * forwardDistance + right * lateralJitter;
         slot.end = slot.start + forward * Mathf.Lerp(10f, 24f, sizeVariation);
         slot.start.y = waterY;
@@ -1052,6 +1062,7 @@ public class BreathToWater : MonoBehaviour
             slot.decal.amplitude = Mathf.Min(
                 maximumWaterDecalLift,
                 nativeWaveAmplitude * slot.strength * envelope * (0.9f + 0.1f * Mathf.Sin(slot.age * 5.1f)));
+            slot.material.SetFloat("_Max_Amplitude", maximumWaterDecalLift);
             slot.decal.transform.position = Vector3.Lerp(slot.start, slot.end, travel);
             float breathing = 1f + 0.07f * Mathf.Sin((slot.age + slot.textureIndex) * 2.3f);
             slot.decal.regionSize = new Vector2(nativeWaveWidth * slot.scale * breathing, nativeWaveLength * slot.scale * breathing);
@@ -1071,12 +1082,14 @@ public class BreathToWater : MonoBehaviour
     {
         // Do not change wind speed, chaos, orientation, repetition size, or ripple speed
         // here. Any of those invalidates HDRP's FFT and recreates the surface every frame.
-        float seaState = Mathf.SmoothStep(0f, 1f, delayedWave);
+        // Loud voices must read immediately. The delayed envelope remains the tail
+        // after a shout, while the live envelope raises the full ocean on its attack.
+        float seaState = Mathf.SmoothStep(0f, 1f, Mathf.Max(delayedWave, waveValue));
         // Keep the largest wavelength below the point where a low exhibition camera
         // turns it into an evenly spaced stripe pattern. Audio energy remains clear
         // in the middle band, foam, and changing reflection instead.
         water.largeBand0Multiplier = Mathf.Lerp(0.30f, maximumLargeBandMultiplier, seaState);
-        water.largeBand1Multiplier = Mathf.Lerp(0.18f, 0.62f, seaState);
+        water.largeBand1Multiplier = Mathf.Lerp(0.18f, 3.4f, seaState);
         water.timeMultiplier = 0.86f;
         water.simulationFoamAmount = Mathf.Lerp(0.16f, 0.48f, Mathf.Clamp01(seaState * foamInfluence));
         if (continuousOcean != null)
@@ -1283,7 +1296,9 @@ public class BreathToWater : MonoBehaviour
         releaseSpeed = DrawSlider("Return speed", releaseSpeed, 0.1f, 5f);
         responseCurve = DrawSlider("Wave curve", responseCurve, 0.3f, 2f);
         pulseThreshold = DrawSlider("Pulse threshold", pulseThreshold, 0.05f, 1f);
-        maximumLargeBandMultiplier = DrawSlider("Wave safety cap", maximumLargeBandMultiplier, 0.1f, 1f);
+        maximumLargeBandMultiplier = DrawSlider("Wave height cap", maximumLargeBandMultiplier, 0.1f, 6f);
+        nativeWaveAmplitude = DrawSlider("Loud crest amplitude", nativeWaveAmplitude, 0f, 10f);
+        maximumWaterDecalLift = DrawSlider("Crest lift cap", maximumWaterDecalLift, 0f, 10f);
 
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Save on this computer")) SaveRuntimeSettings();
@@ -1323,6 +1338,8 @@ public class BreathToWater : MonoBehaviour
         PlayerPrefs.SetFloat(PreferencesPrefix + "Curve", responseCurve);
         PlayerPrefs.SetFloat(PreferencesPrefix + "PulseThreshold", pulseThreshold);
         PlayerPrefs.SetFloat(PreferencesPrefix + "SafetyCap", maximumLargeBandMultiplier);
+        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveAmplitude", nativeWaveAmplitude);
+        PlayerPrefs.SetFloat(PreferencesPrefix + "WaterDecalLift", maximumWaterDecalLift);
         PlayerPrefs.Save();
         statusMessage = "Settings saved.";
     }
@@ -1339,6 +1356,8 @@ public class BreathToWater : MonoBehaviour
         responseCurve = PlayerPrefs.GetFloat(PreferencesPrefix + "Curve", responseCurve);
         pulseThreshold = PlayerPrefs.GetFloat(PreferencesPrefix + "PulseThreshold", pulseThreshold);
         maximumLargeBandMultiplier = PlayerPrefs.GetFloat(PreferencesPrefix + "SafetyCap", maximumLargeBandMultiplier);
+        nativeWaveAmplitude = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveAmplitude", nativeWaveAmplitude);
+        maximumWaterDecalLift = PlayerPrefs.GetFloat(PreferencesPrefix + "WaterDecalLift", maximumWaterDecalLift);
     }
 
     void OnDisable()
