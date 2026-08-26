@@ -128,7 +128,7 @@ public class BreathToWater : MonoBehaviour
     [Range(0f, 360f)] public float rippleDirection = 318f;
     [Range(0f, 1f)] public float nearWaterSmoothness = 0.82f;
     [Range(0f, 1f)] public float farWaterSmoothness = 0.56f;
-    [Tooltip("Raises the fixed exhibition viewpoint so local wave groups do not collapse into horizon stripes.")]
+    [Tooltip("Retained for scene compatibility. The exhibition controller never changes the authored camera transform.")]
     public float exhibitionCameraHeightOffset = 1.35f;
     public float exhibitionCameraPitchDown = 3.2f;
 
@@ -434,9 +434,6 @@ public class BreathToWater : MonoBehaviour
     {
         if (!applyExhibitionWaterLook)
             return;
-
-        referenceCamera.position += Vector3.up * exhibitionCameraHeightOffset;
-        referenceCamera.rotation *= Quaternion.Euler(exhibitionCameraPitchDown, 0f, 0f);
 
         // The authored scene predates the exhibition preset, so enforce its safe response
         // here instead of depending on serialized inspector defaults.
