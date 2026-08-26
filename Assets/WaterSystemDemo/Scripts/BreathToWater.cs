@@ -35,7 +35,7 @@ public class BreathToWater : MonoBehaviour
     public bool useNativeAudioWaveDecals = false;
     [Range(1, 6)] public int nativeAudioWavePoolSize = 4;
     [Tooltip("The peak displacement of a loud microphone-triggered crest group, in metres.")]
-    public float nativeWaveAmplitude = 1.4f;
+    public float nativeWaveAmplitude = 8f;
     public float nativeWaveLifetime = 4.2f;
     public float nativeWaveNearDistance = 10f;
     public float nativeWaveFarDistance = 36f;
@@ -121,7 +121,7 @@ public class BreathToWater : MonoBehaviour
     public bool disableStaticSceneDeformation = true;
     [Range(0f, 1f)] public float maximumWaterDecalDepression = 0.15f;
     [Tooltip("Positive lift cap for local audio wave decals, in metres.")]
-    [Range(0f, 2f)] public float maximumWaterDecalLift = 1.25f;
+    [Range(0f, 10f)] public float maximumWaterDecalLift = 9f;
 
     [Header("Exhibition Water Look")]
     [Tooltip("Applies a less directional, less mirror-like ocean treatment at runtime.")]
@@ -459,12 +459,12 @@ public class BreathToWater : MonoBehaviour
         water.customMaterial = null;
         // Loud inputs remain visibly strong, but leave clearance below the fixed camera.
         responseCurve = Mathf.Max(responseCurve, 1.5f);
-        nativeWaveAmplitude = Mathf.Min(Mathf.Max(nativeWaveAmplitude, 1.1f), 1.6f);
-        maximumWaterDecalLift = Mathf.Min(Mathf.Max(maximumWaterDecalLift, 1.1f), 1.4f);
+        nativeWaveAmplitude = Mathf.Max(nativeWaveAmplitude, 8f);
+        maximumWaterDecalLift = Mathf.Max(maximumWaterDecalLift, 9f);
         nativeWaveNearDistance = 10f;
         nativeWaveFarDistance = 36f;
-        nativeWaveWidth = 24f;
-        nativeWaveLength = 22f;
+        nativeWaveWidth = 42f;
+        nativeWaveLength = 34f;
         globalAttackSpeed = 0.32f;
         globalReleaseSpeed = 0.09f;
         maximumLargeBandMultiplier = Mathf.Min(Mathf.Max(maximumLargeBandMultiplier, 1.1f), 1.3f);
@@ -972,7 +972,9 @@ public class BreathToWater : MonoBehaviour
         Vector3 right = Vector3.Cross(Vector3.up, forward);
         // Keep theatrical crests in the near field where their vertical motion reads
         // clearly at the authored fixed camera angle.
-        float forwardDistance = Mathf.Lerp(6f, 16f, Mathf.PerlinNoise(pulseSequence * 2.63f, 0.87f));
+        // Place the tall part of the crest in the middle distance. A high wave there
+        // reads strongly against the horizon without physically intersecting the lens.
+        float forwardDistance = Mathf.Lerp(48f, 72f, Mathf.PerlinNoise(pulseSequence * 2.63f, 0.87f));
         slot.start = origin + forward * forwardDistance + right * lateralJitter;
         slot.end = slot.start + forward * Mathf.Lerp(10f, 24f, sizeVariation);
         slot.start.y = waterY;
@@ -1039,7 +1041,6 @@ public class BreathToWater : MonoBehaviour
         // through the authored camera. The safety margin is intentionally zero here
         // so the loud state can use the full available vertical range.
         float cameraLiftLimit = GetCameraLiftLimit();
-        maximumWaterDecalLift = Mathf.Min(maximumWaterDecalLift, cameraLiftLimit);
 
         for (int i = 0; i < nativeWaveSlots.Length; i++)
         {
@@ -1065,8 +1066,11 @@ public class BreathToWater : MonoBehaviour
             // Positive-only displacement preserves the raised shoreline clearance:
             // a loud input adds a finite crest group rather than carving a trough
             // that can expose the rocks under the authored water level.
+            float distanceFromCamera = Vector3.Distance(referenceCamera.position, slot.decal.transform.position);
+            float distanceBlend = Mathf.InverseLerp(18f, 55f, distanceFromCamera);
+            float spatialLiftLimit = Mathf.Lerp(cameraLiftLimit, maximumWaterDecalLift, distanceBlend);
             slot.decal.amplitude = Mathf.Min(
-                maximumWaterDecalLift,
+                spatialLiftLimit,
                 nativeWaveAmplitude * slot.strength * envelope * (0.9f + 0.1f * Mathf.Sin(slot.age * 5.1f)));
             slot.material.SetFloat("_Max_Amplitude", maximumWaterDecalLift);
             slot.decal.transform.position = Vector3.Lerp(slot.start, slot.end, travel);
