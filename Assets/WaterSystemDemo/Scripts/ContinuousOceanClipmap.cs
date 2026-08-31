@@ -1,4 +1,8 @@
 using System.Collections.Generic;
+using Unity.Burst;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.HighDefinition;
@@ -11,7 +15,7 @@ using UnityEngine.Rendering.HighDefinition;
 [DefaultExecutionOrder(20)]
 public sealed class ContinuousOceanClipmap : MonoBehaviour
 {
-    const int WaveCount = 24;
+    const int WaveCount = 14;
 
     struct WaveComponent
     {
@@ -21,6 +25,92 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
         public float amplitude;
         public float phase;
         public float groupPhase;
+    }
+
+    struct WaveComponentJob
+    {
+        public float2 direction;
+        public float2 groupDirection;
+        public float wavelength;
+        public float amplitude;
+        public float phase;
+        public float groupPhase;
+    }
+
+    [BurstCompile]
+    struct SurfaceJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<float2> grid;
+        [ReadOnly] public NativeArray<WaveComponentJob> waves;
+        public NativeArray<float3> vertices;
+        public NativeArray<float3> normals;
+        public float3 anchor;
+        public float3 right;
+        public float3 forward;
+        public float nearDistance;
+        public float farDistance;
+        public float nearHalfWidth;
+        public float farHalfWidth;
+        public float energy;
+        public float baseLift;
+        public float time;
+
+        public void Execute(int index)
+        {
+            float2 coordinate = grid[index];
+            float z = nearDistance + (farDistance - nearDistance) * (math.exp(coordinate.y * 4.6f) - 1f) / (math.exp(4.6f) - 1f);
+            float halfWidth = math.lerp(nearHalfWidth, farHalfWidth, math.saturate((z - nearDistance) / (farDistance - nearDistance)));
+            float x = math.lerp(-halfWidth, halfWidth, coordinate.x);
+            float3 world = anchor + right * x + forward * z;
+            float2 warped = DomainWarp(world.x, world.z);
+            world.x += warped.x;
+            world.z += warped.y;
+
+            float3 position = world + new float3(0f, baseLift, 0f);
+            float3 tangent = new float3(1f, 0f, 0f);
+            float3 binormal = new float3(0f, 0f, 1f);
+            float2 worldXZ = world.xz;
+
+            for (int i = 0; i < waves.Length; i++)
+            {
+                WaveComponentJob wave = waves[i];
+                float waveNumber = 6.2831853f / wave.wavelength;
+                float groupA = math.sin(math.dot(wave.groupDirection, worldXZ) * (0.018f + i * 0.0009f) + wave.groupPhase + time * 0.11f);
+                float groupB = math.sin(math.dot(wave.direction, worldXZ) * (0.007f + i * 0.00035f) + wave.phase * 1.7f - time * 0.07f);
+                float groupEnvelope = math.lerp(0.42f, 1f, 0.5f + 0.32f * groupA + 0.18f * groupB);
+                float amplitude = wave.amplitude * energy * groupEnvelope;
+                float phase = waveNumber * math.dot(wave.direction, worldXZ) + math.sqrt(9.81f * waveNumber) * time + wave.phase;
+                float steepness = math.min(0.46f, 0.19f / math.max(0.02f, waveNumber * amplitude * waves.Length));
+                float sine = math.sin(phase);
+                float cosine = math.cos(phase);
+                float horizontal = steepness * amplitude;
+
+                position.x += wave.direction.x * horizontal * cosine;
+                position.z += wave.direction.y * horizontal * cosine;
+                position.y += amplitude * sine;
+                tangent += new float3(-wave.direction.x * wave.direction.x * steepness * amplitude * waveNumber * sine, wave.direction.x * amplitude * waveNumber * cosine, -wave.direction.x * wave.direction.y * steepness * amplitude * waveNumber * sine);
+                binormal += new float3(-wave.direction.x * wave.direction.y * steepness * amplitude * waveNumber * sine, wave.direction.y * amplitude * waveNumber * cosine, -wave.direction.y * wave.direction.y * steepness * amplitude * waveNumber * sine);
+            }
+
+            float3 normal = math.normalize(math.cross(binormal, tangent));
+            if (normal.y < 0f) normal = -normal;
+            float3 delta = position - anchor;
+            vertices[index] = new float3(math.dot(delta, right), delta.y, math.dot(delta, forward));
+            normals[index] = new float3(math.dot(normal, right), normal.y, math.dot(normal, forward));
+        }
+
+        static float2 DomainWarp(float x, float z)
+        {
+            float largeA = x * 0.0091f + z * 0.0047f + 0.7f;
+            float largeB = x * -0.0037f + z * 0.0103f + 2.1f;
+            float middleA = x * 0.028f + z * -0.019f + 1.6f;
+            float middleB = x * 0.017f + z * 0.034f + 4.4f;
+            float smallA = x * -0.074f + z * 0.061f + 0.9f;
+            float smallB = x * 0.053f + z * 0.082f + 3.7f;
+            return new float2(
+                31f * (0.58f * math.sin(largeA) + 0.42f * math.cos(largeB)) + 13f * math.sin(middleA) + 4f * math.cos(smallA),
+                31f * (0.46f * math.cos(largeA) - 0.54f * math.sin(largeB)) + 13f * math.cos(middleB) + 4f * math.sin(smallB));
+        }
     }
 
     static readonly WaveComponent[] Waves = CreateWaveSet();
@@ -72,12 +162,12 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
     public bool useHdrpWaterRenderer = false;
 
     [Header("Continuous Surface")]
-    [Range(80, 192)] public int columns = 144;
-    [Range(64, 176)] public int rows = 120;
-    public float nearDistance = -28f;
-    public float farDistance = 1450f;
-    public float nearHalfWidth = 150f;
-    public float farHalfWidth = 1320f;
+    [Range(80, 192)] public int columns = 112;
+    [Range(64, 176)] public int rows = 88;
+    public float nearDistance = -80f;
+    public float farDistance = 5000f;
+    public float nearHalfWidth = 900f;
+    public float farHalfWidth = 9000f;
     [Range(0f, 48f)] public float largeDomainWarp = 31f;
     [Range(0f, 24f)] public float middleDomainWarp = 13f;
     [Range(0f, 10f)] public float smallDomainWarp = 4f;
@@ -93,6 +183,10 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
     Vector3[] normals;
     Vector4[] tangents;
     Vector2[] gridCoordinates;
+    NativeArray<float2> nativeGrid;
+    NativeArray<WaveComponentJob> nativeWaves;
+    NativeArray<float3> nativeVertices;
+    NativeArray<float3> nativeNormals;
     List<MeshRenderer> originalMeshRenderers;
     WaterGeometryType originalGeometryType;
     bool originalWaterWasEnabled;
@@ -130,6 +224,7 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
         }
         mesh = null;
         material = null;
+        DisposeNativeArrays();
     }
 
     void CreateSurface()
@@ -151,6 +246,23 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
         normals = new Vector3[vertices.Length];
         tangents = new Vector4[vertices.Length];
         gridCoordinates = new Vector2[vertices.Length];
+        nativeGrid = new NativeArray<float2>(vertices.Length, Allocator.Persistent);
+        nativeVertices = new NativeArray<float3>(vertices.Length, Allocator.Persistent);
+        nativeNormals = new NativeArray<float3>(vertices.Length, Allocator.Persistent);
+        nativeWaves = new NativeArray<WaveComponentJob>(Waves.Length, Allocator.Persistent);
+        for (int i = 0; i < Waves.Length; i++)
+        {
+            WaveComponent source = Waves[i];
+            nativeWaves[i] = new WaveComponentJob
+            {
+                direction = new float2(source.direction.x, source.direction.y),
+                groupDirection = new float2(source.groupDirection.x, source.groupDirection.y),
+                wavelength = source.wavelength,
+                amplitude = source.amplitude,
+                phase = source.phase,
+                groupPhase = source.groupPhase
+            };
+        }
         int[] triangles = new int[columnCount * rowCount * 6];
 
         int vertex = 0;
@@ -158,6 +270,7 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
         for (int x = 0; x <= columnCount; x++)
         {
             gridCoordinates[vertex] = new Vector2(x / (float)columnCount, z / (float)rowCount);
+            nativeGrid[vertex] = new float2(gridCoordinates[vertex].x, gridCoordinates[vertex].y);
             normals[vertex] = Vector3.up;
             tangents[vertex] = new Vector4(1f, 0f, 0f, 1f);
             vertex++;
@@ -196,7 +309,7 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
         material = new Material(shader) { name = "Continuous Multi-Scale Ocean Material" };
         material.SetColor("_BaseColor", new Color(0.018f, 0.11f, 0.14f, 1f));
         material.SetFloat("_Metallic", 0f);
-        material.SetFloat("_Smoothness", 0.76f);
+        material.SetFloat("_Smoothness", 0.91f);
         // The previous 512px normal was tiled dozens of times over the clipmap.
         // That made a procedural normal field read as visible, evenly spaced bands.
         // Geometric normals already contain the full wave hierarchy and stay coupled
@@ -274,28 +387,36 @@ public sealed class ContinuousOceanClipmap : MonoBehaviour
         anchor.y = originalWater != null ? originalWater.transform.position.y : transform.position.y;
         transform.SetPositionAndRotation(anchor, yaw);
 
-        for (int i = 0; i < vertices.Length; i++)
+        float energy = Mathf.Lerp(calmEnergy, activeEnergy, Mathf.SmoothStep(0f, 1f, audioEnergy));
+        SurfaceJob job = new SurfaceJob
         {
-            Vector2 grid = gridCoordinates[i];
-            // Logarithmic distance distributes the geometry where a viewer can resolve it.
-            float z = nearDistance + (farDistance - nearDistance) * (Mathf.Exp(grid.y * 4.6f) - 1f) / (Mathf.Exp(4.6f) - 1f);
-            float halfWidth = Mathf.Lerp(nearHalfWidth, farHalfWidth, Mathf.Clamp01((z - nearDistance) / (farDistance - nearDistance)));
-            float x = Mathf.Lerp(-halfWidth, halfWidth, grid.x);
-            Vector3 world = anchor + yaw * new Vector3(x, 0f, z);
-            Vector2 warp = EvaluateDomainWarp(world.x, world.z);
-            world.x += warp.x;
-            world.z += warp.y;
-            float energy = Mathf.Lerp(calmEnergy, activeEnergy, Mathf.SmoothStep(0f, 1f, audioEnergy));
-            Vector3 displacedWorld = EvaluateGerstner(world, energy, out Vector3 normal);
-            vertices[i] = Quaternion.Inverse(yaw) * (displacedWorld - anchor);
-            normals[i] = Quaternion.Inverse(yaw) * normal;
-            tangents[i] = new Vector4(1f, 0f, 0f, 1f);
-        }
-
-        mesh.vertices = vertices;
-        mesh.normals = normals;
-        mesh.tangents = tangents;
+            grid = nativeGrid,
+            waves = nativeWaves,
+            vertices = nativeVertices,
+            normals = nativeNormals,
+            anchor = new float3(anchor.x, anchor.y, anchor.z),
+            right = new float3(yaw * Vector3.right),
+            forward = new float3(yaw * Vector3.forward),
+            nearDistance = nearDistance,
+            farDistance = farDistance,
+            nearHalfWidth = nearHalfWidth,
+            farHalfWidth = farHalfWidth,
+            energy = energy,
+            baseLift = baseLift,
+            time = Time.time
+        };
+        job.Schedule(nativeVertices.Length, 64).Complete();
+        mesh.SetVertices(nativeVertices);
+        mesh.SetNormals(nativeNormals);
         mesh.bounds = new Bounds(new Vector3(0f, 0f, (nearDistance + farDistance) * 0.5f), new Vector3(farHalfWidth * 2.2f, 8f, farDistance - nearDistance + 50f));
+    }
+
+    void DisposeNativeArrays()
+    {
+        if (nativeGrid.IsCreated) nativeGrid.Dispose();
+        if (nativeWaves.IsCreated) nativeWaves.Dispose();
+        if (nativeVertices.IsCreated) nativeVertices.Dispose();
+        if (nativeNormals.IsCreated) nativeNormals.Dispose();
     }
 
     Vector3 EvaluateGerstner(Vector3 world, float energy, out Vector3 normal)

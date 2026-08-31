@@ -41,6 +41,10 @@ public class BreathToWater : MonoBehaviour
     public float nativeWaveFarDistance = 36f;
     public float nativeWaveWidth = 15f;
     public float nativeWaveLength = 13f;
+    [Tooltip("Near edge of the audio crest safety zone. Crest lift ramps from camera clearance here to full lift at the full-distance value.")]
+    public float nativeWaveSafeNearDistance = 90f;
+    [Tooltip("Distance at which an audio crest may use its full positive lift.")]
+    public float nativeWaveFullDistance = 180f;
 
     [Header("HDRP Current Variation")]
     [Tooltip("Adds slow, spatially varied flow to the same HDRP ocean spectrum. It never deforms the shoreline height field.")]
@@ -109,6 +113,10 @@ public class BreathToWater : MonoBehaviour
     [Header("Water Safety")]
     [Tooltip("Upper displacement multiplier for the broad HDRP swell. Values above 1 are intentionally theatrical.")]
     [Range(0.1f, 6f)] public float maximumLargeBandMultiplier = 5f;
+    [Tooltip("Symmetric HDRP FFT waves create both crests and troughs. This cap keeps the broad trough above the authored seabed while local audio decals provide the tall positive crest.")]
+    [Range(0.5f, 3f)] public float maximumGlobalBandMultiplier = 1.35f;
+    [Tooltip("Cap for the secondary global band; local audio waves are not reduced by this value.")]
+    [Range(0.25f, 2f)] public float maximumGlobalSecondaryBandMultiplier = 1.05f;
     [Range(0f, 1f)] public float rippleInfluence = 1f;
     [Range(0f, 1f)] public float foamInfluence = 0.75f;
 
@@ -441,20 +449,17 @@ public class BreathToWater : MonoBehaviour
 
         // The authored scene predates the exhibition preset, so enforce its safe response
         // here instead of depending on serialized inspector defaults.
-        // The native foam-wave decal does not contribute enough geometric height for
-        // the exhibition's loud state. Use HDRP's deformation decal in the middle
-        // distance, where a tall crest cannot intersect the fixed camera.
-        pulseNearDistance = 55f;
-        pulseFarDistance = 105f;
-        pulseTravelTime = 7f;
-        pulsePoolSize = 1;
+        // Use the positive-only circle decal for theatrical crests. The former
+        // bipolar deformer made a deep negative trough whenever its peak was raised.
+        useNativeAudioWaveDecals = true;
+        useLegacyWaterDeformer = false;
+        nativeWaveNearDistance = 55f;
+        nativeWaveFarDistance = 90f;
+        nativeWaveAmplitude = Mathf.Max(nativeWaveAmplitude, 8f);
+        maximumWaterDecalLift = Mathf.Max(maximumWaterDecalLift, 9f);
+        nativeWaveWidth = 52f;
+        nativeWaveLength = 46f;
         pulseCooldown = 1.2f;
-        pulseAmplitude = 10f;
-        maxPulseAmplitude = 12f;
-        pulseWidth = 74f;
-        pulseLength = 58f;
-        useNativeAudioWaveDecals = false;
-        useLegacyWaterDeformer = true;
         useProceduralNearOcean = false;
         // Keep one coherent HDRP spectrum. The former normal-map, static deformation,
         // and current-decal overlays each had an independent periodic domain; their
@@ -470,8 +475,11 @@ public class BreathToWater : MonoBehaviour
         responseCurve = Mathf.Max(responseCurve, 1.5f);
         nativeWaveAmplitude = Mathf.Max(nativeWaveAmplitude, 18f);
         maximumWaterDecalLift = Mathf.Max(maximumWaterDecalLift, 20f);
-        nativeWaveNearDistance = 10f;
-        nativeWaveFarDistance = 36f;
+        // Keep the high positive crest in the middle distance. With the authored
+        // camera only about 1.75 m above the datum, a 20 m decal placed in the
+        // near field can fill the lens even though it is not a negative trough.
+        nativeWaveNearDistance = 105f;
+        nativeWaveFarDistance = 155f;
         nativeWaveWidth = 52f;
         nativeWaveLength = 46f;
         globalAttackSpeed = 0.32f;
@@ -520,7 +528,10 @@ public class BreathToWater : MonoBehaviour
         // Runtime audio decals are spawned relative to the viewing camera. Keep HDRP's
         // finite decal simulation region centred on that camera so they reach the water.
         water.decalRegionAnchor = referenceCamera;
-        water.decalRegionSize = new Vector2(240f, 240f);
+        // Audio crests live in the middle distance; keep the HDRP atlas large
+        // enough to contain their full positive lift instead of silently dropping
+        // the far end of the wave path.
+        water.decalRegionSize = new Vector2(420f, 420f);
 
         HDAdditionalCameraData cameraData = referenceCamera.GetComponent<HDAdditionalCameraData>();
         if (cameraData != null)
@@ -808,7 +819,10 @@ public class BreathToWater : MonoBehaviour
         if (!useNativeAudioWaveDecals)
             return;
 
-        nativeWaveMaterial = Resources.Load<Material>("AudioPulseDecal/Audio Foam Wave");
+        // Use the standalone runtime material. The copied sample material keeps an
+        // invalid _AFFECTS_DEFORMATION keyword on DX11 and resolves to
+        // Hidden/InternalErrorShader in a player/editor build.
+        nativeWaveMaterial = Resources.Load<Material>("AudioPulseDecal/Audio Pulse Deformer");
         if (nativeWaveMaterial == null)
         {
             Debug.LogError("BreathToWater: Audio pulse decal material is missing. Re-import the HDRP water decal samples.");
@@ -826,6 +840,9 @@ public class BreathToWater : MonoBehaviour
             obj.transform.SetParent(transform, false);
             WaterDecal decal = obj.AddComponent<WaterDecal>();
             Material slotMaterial = new Material(nativeWaveMaterial) { name = "Audio Wave Packet " + i };
+            slotMaterial.EnableKeyword("_AFFECTS_DEFORMATION");
+            if (nativeWavePackets[i] != null)
+                slotMaterial.SetTexture(WavePacketTextureProperty, nativeWavePackets[i]);
             // HDRP's sample graph has its own height limiter. Keep it in step with
             // the exhibition control rather than silently clamping a loud crest.
             slotMaterial.SetFloat("_Max_Amplitude", maximumWaterDecalLift);
@@ -985,7 +1002,8 @@ public class BreathToWater : MonoBehaviour
         // clearly at the authored fixed camera angle.
         // Place the tall part of the crest in the middle distance. A high wave there
         // reads strongly against the horizon without physically intersecting the lens.
-        float forwardDistance = Mathf.Lerp(70f, 90f, Mathf.PerlinNoise(pulseSequence * 2.63f, 0.87f));
+        float forwardDistance = Mathf.Lerp(nativeWaveNearDistance, nativeWaveFarDistance,
+            Mathf.PerlinNoise(pulseSequence * 2.63f, 0.87f));
         slot.start = origin + forward * forwardDistance + right * lateralJitter;
         slot.end = slot.start + forward * Mathf.Lerp(10f, 24f, sizeVariation);
         slot.start.y = waterY;
@@ -1079,7 +1097,7 @@ public class BreathToWater : MonoBehaviour
             // a loud input adds a finite crest group rather than carving a trough
             // that can expose the rocks under the authored water level.
             float distanceFromCamera = Vector3.Distance(referenceCamera.position, slot.decal.transform.position);
-            float distanceBlend = Mathf.InverseLerp(18f, 55f, distanceFromCamera);
+            float distanceBlend = Mathf.InverseLerp(nativeWaveSafeNearDistance, nativeWaveFullDistance, distanceFromCamera);
             float spatialLiftLimit = Mathf.Lerp(cameraLiftLimit, maximumWaterDecalLift, distanceBlend);
             slot.decal.amplitude = Mathf.Min(
                 spatialLiftLimit,
@@ -1119,8 +1137,14 @@ public class BreathToWater : MonoBehaviour
         // Keep the largest wavelength below the point where a low exhibition camera
         // turns it into an evenly spaced stripe pattern. Audio energy remains clear
         // in the middle band, foam, and changing reflection instead.
-        water.largeBand0Multiplier = Mathf.Lerp(0.30f, maximumLargeBandMultiplier, seaState);
-        water.largeBand1Multiplier = Mathf.Lerp(0.18f, 3.4f, seaState);
+        // HDRP FFT displacement is bipolar: multiplying it for a taller crest also
+        // deepens the opposite trough. Keep the broad spectrum bounded so it cannot
+        // uncover the authored rocks; the positive-only audio decals carry the loud,
+        // theatrical height independently.
+        float broadBandCap = Mathf.Min(maximumLargeBandMultiplier, maximumGlobalBandMultiplier);
+        float secondaryBandCap = Mathf.Min(3.4f, maximumGlobalSecondaryBandMultiplier);
+        water.largeBand0Multiplier = Mathf.Lerp(0.30f, broadBandCap, seaState);
+        water.largeBand1Multiplier = Mathf.Lerp(0.18f, secondaryBandCap, seaState);
         water.timeMultiplier = 0.86f;
         water.simulationFoamAmount = Mathf.Lerp(0.16f, 0.48f, Mathf.Clamp01(seaState * foamInfluence));
         if (continuousOcean != null)
