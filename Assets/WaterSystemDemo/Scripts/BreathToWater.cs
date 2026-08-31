@@ -34,17 +34,23 @@ public class BreathToWater : MonoBehaviour
     [Tooltip("Each sound carries a small, non-uniform foam crest group across the water without retuning the entire FFT ocean.")]
     public bool useNativeAudioWaveDecals = false;
     [Range(1, 6)] public int nativeAudioWavePoolSize = 4;
-    [Tooltip("The peak displacement of a loud microphone-triggered crest group, in metres.")]
-    public float nativeWaveAmplitude = 18f;
+    [Tooltip("The peak displacement requested by a loud microphone-triggered crest group, in metres.")]
+    public float nativeWaveAmplitude = 44f;
     public float nativeWaveLifetime = 4.2f;
     public float nativeWaveNearDistance = 10f;
     public float nativeWaveFarDistance = 36f;
     public float nativeWaveWidth = 15f;
     public float nativeWaveLength = 13f;
-    [Tooltip("Near edge of the audio crest safety zone. Crest lift ramps from camera clearance here to full lift at the full-distance value.")]
-    public float nativeWaveSafeNearDistance = 90f;
-    [Tooltip("Distance at which an audio crest may use its full positive lift.")]
+    [Tooltip("Horizontal distance from the closest edge of a crest where its height remains limited to the fixed camera clearance.")]
+    public float nativeWaveSafeNearDistance = 45f;
+    [Tooltip("Horizontal distance from the closest crest edge at which the middle-distance height is reached.")]
+    public float nativeWaveMidDistance = 110f;
+    [Tooltip("Horizontal distance from the closest crest edge at which the far-distance height is reached.")]
     public float nativeWaveFullDistance = 180f;
+    [Tooltip("Maximum positive lift available to a crest in the middle distance.")]
+    public float nativeWaveMidLift = 18f;
+    [Tooltip("Maximum positive lift available only to the audio wave groups in the far distance.")]
+    public float nativeWaveFarLift = 44f;
 
     [Header("HDRP Current Variation")]
     [Tooltip("Adds slow, spatially varied flow to the same HDRP ocean spectrum. It never deforms the shoreline height field.")]
@@ -129,7 +135,7 @@ public class BreathToWater : MonoBehaviour
     public bool disableStaticSceneDeformation = true;
     [Range(0f, 1f)] public float maximumWaterDecalDepression = 0.15f;
     [Tooltip("Positive lift cap for local audio wave decals, in metres.")]
-    [Range(0f, 25f)] public float maximumWaterDecalLift = 20f;
+    [Range(0f, 50f)] public float maximumWaterDecalLift = 44f;
 
     [Header("Exhibition Water Look")]
     [Tooltip("Applies a less directional, less mirror-like ocean treatment at runtime.")]
@@ -197,6 +203,7 @@ public class BreathToWater : MonoBehaviour
     Material spectralOceanDeformerMaterial;
     Texture2D spectralOceanHeightField;
     Texture2D[] nativeWavePackets;
+    bool generatedWavePackets;
     const string WavePacketTextureProperty = "_SampleTexture2D_b6ca83ee7a5744eda121f52ddeb1fa1d_Texture_1_Texture2D";
     GameObject proceduralOceanObject;
     Mesh proceduralOceanMesh;
@@ -220,8 +227,15 @@ public class BreathToWater : MonoBehaviour
     class PulseSlot
     {
         public WaterDeformer deformer;
+        public Material material;
         public float age;
+        public float duration;
         public float strength;
+        public float scale;
+        public float widthScale;
+        public float lengthScale;
+        public int textureIndex;
+        public bool nearShoulder;
         public Vector3 start;
         public Vector3 end;
         public bool active;
@@ -363,7 +377,49 @@ public class BreathToWater : MonoBehaviour
         inputSource = InputSource.Simulator;
         simulationPattern = SimulationPattern.ExhibitionStressTest;
         simulatorStartTime = Time.time;
+        ResetRuntimeWaveState();
         statusMessage = "Simulator: ExhibitionStressTest";
+    }
+
+    void ResetRuntimeWaveState()
+    {
+        smoothedSound = 0f;
+        smoothedGlobalWave = 0f;
+        delayedGlobalWave = 0f;
+        breathValue = 0f;
+        waveValue = 0f;
+        pulseValue = 0f;
+        lastPulseTime = -999f;
+        pulseSequence = 0;
+
+        if (pulseSlots != null)
+        {
+            for (int i = 0; i < pulseSlots.Length; i++)
+            {
+                PulseSlot slot = pulseSlots[i];
+                slot.age = 0f;
+                if (slot.deformer != null)
+                {
+                    slot.deformer.amplitude = 0f;
+                    slot.deformer.RequestUpdate();
+                    slot.deformer.gameObject.SetActive(false);
+                }
+                slot.active = false;
+            }
+        }
+
+        if (nativeWaveSlots != null)
+        {
+            for (int i = 0; i < nativeWaveSlots.Length; i++)
+            {
+                NativeWaveSlot slot = nativeWaveSlots[i];
+                slot.age = 0f;
+                slot.decal.amplitude = 0f;
+                slot.decal.RequestUpdate();
+                slot.decal.gameObject.SetActive(false);
+                slot.active = false;
+            }
+        }
     }
 
     void SetupMicrophone()
@@ -449,10 +505,15 @@ public class BreathToWater : MonoBehaviour
 
         // The authored scene predates the exhibition preset, so enforce its safe response
         // here instead of depending on serialized inspector defaults.
-        // Use the positive-only circle decal for theatrical crests. The former
-        // bipolar deformer made a deep negative trough whenever its peak was raised.
-        useNativeAudioWaveDecals = true;
-        useLegacyWaterDeformer = false;
+        // HDRP's standalone WaterDecal graph is visually too subtle at the
+        // exhibition camera. Reuse the proven deformation renderer, but feed it a
+        // positive-only height field so loud input cannot carve a deep trough.
+        useNativeAudioWaveDecals = false;
+        useLegacyWaterDeformer = true;
+        // Each audio event owns a broad near shoulder and a separate traveling
+        // crest. Keep enough slots for the four-event lifetime overlap.
+        pulsePoolSize = Mathf.Max(pulsePoolSize, 8);
+        pulseTravelTime = 4.2f;
         nativeWaveNearDistance = 55f;
         nativeWaveFarDistance = 90f;
         nativeWaveAmplitude = Mathf.Max(nativeWaveAmplitude, 8f);
@@ -473,18 +534,32 @@ public class BreathToWater : MonoBehaviour
         water.customMaterial = null;
         // Loud inputs remain visibly strong, but leave clearance below the fixed camera.
         responseCurve = Mathf.Max(responseCurve, 1.5f);
-        nativeWaveAmplitude = Mathf.Max(nativeWaveAmplitude, 18f);
-        maximumWaterDecalLift = Mathf.Max(maximumWaterDecalLift, 20f);
+        nativeWaveFarLift = Mathf.Clamp(Mathf.Max(nativeWaveFarLift, 7f), 7f, 12f);
+        nativeWaveAmplitude = Mathf.Clamp(Mathf.Max(nativeWaveAmplitude, 10f), 10f, 14f);
+        maximumWaterDecalLift = Mathf.Clamp(Mathf.Max(maximumWaterDecalLift, 12f), 12f, 18f);
         // Keep the high positive crest in the middle distance. With the authored
         // camera only about 1.75 m above the datum, a 20 m decal placed in the
         // near field can fill the lens even though it is not a negative trough.
-        nativeWaveNearDistance = 105f;
-        nativeWaveFarDistance = 155f;
-        nativeWaveWidth = 52f;
-        nativeWaveLength = 46f;
+        // Bring the first crest into the readable near field. Its tail overlaps
+        // the second crest, so the height envelope has no visible step at the
+        // foreground/middle-distance boundary.
+        nativeWaveNearDistance = 42f;
+        nativeWaveFarDistance = 108f;
+        nativeWaveSafeNearDistance = 6f;
+        nativeWaveMidDistance = 64f;
+        nativeWaveFullDistance = 140f;
+        nativeWaveMidLift = Mathf.Clamp(Mathf.Max(nativeWaveMidLift, 3.8f), 3.8f, 6f);
+        nativeWaveWidth = 46f;
+        nativeWaveLength = 36f;
+        // The authored 200 m decal region clips a crest before it reaches the
+        // deliberately safe middle/far distances. This is a simulation domain,
+        // not a camera or water-mesh setting.
+        water.decalRegionSize = new Vector2(560f, 440f);
         globalAttackSpeed = 0.32f;
         globalReleaseSpeed = 0.09f;
         maximumLargeBandMultiplier = Mathf.Max(maximumLargeBandMultiplier, 5f);
+        maximumGlobalBandMultiplier = Mathf.Max(maximumGlobalBandMultiplier, 1.5f);
+        maximumGlobalSecondaryBandMultiplier = Mathf.Max(maximumGlobalSecondaryBandMultiplier, 1.35f);
         calmDistantWindSpeed = 28f;
         calmFirstBand = 0.62f;
         calmSecondBand = 0.35f;
@@ -523,7 +598,7 @@ public class BreathToWater : MonoBehaviour
         water.ripplesFadeMode = WaterSurface.FadeMode.Custom;
         water.ripplesFadeStart = 38f;
         water.ripplesFadeDistance = 210f;
-        rippleInfluence = Mathf.Min(rippleInfluence, 0.7f);
+        rippleInfluence = Mathf.Min(rippleInfluence, 0.85f);
 
         // Runtime audio decals are spawned relative to the viewing camera. Keep HDRP's
         // finite decal simulation region centred on that camera so they reach the water.
@@ -785,6 +860,89 @@ public class BreathToWater : MonoBehaviour
         }
     }
 
+    void EnsureWavePacketTextures()
+    {
+        if (nativeWavePackets == null || nativeWavePackets.Length != 4)
+            nativeWavePackets = new Texture2D[4];
+
+        // The authored EXR packets are intentionally soft for the original sample
+        // scene. Generate the bounded, irregular packet at runtime for the exhibition
+        // path so the close crest keeps visible local contrast without changing the
+        // imported assets.
+        bool preferRuntimePackets = applyExhibitionWaterLook && useLegacyWaterDeformer;
+        bool missingPacket = false;
+        for (int i = 0; i < nativeWavePackets.Length; i++)
+        {
+            if (!preferRuntimePackets && nativeWavePackets[i] == null)
+                nativeWavePackets[i] = Resources.Load<Texture2D>("AudioPulseDecal/Packets/WavePacketV2_" + i);
+            missingPacket |= preferRuntimePackets || nativeWavePackets[i] == null;
+        }
+
+        if (preferRuntimePackets)
+        {
+            for (int i = 0; i < nativeWavePackets.Length; i++)
+                nativeWavePackets[i] = null;
+            missingPacket = true;
+        }
+
+        if (!missingPacket)
+        {
+            return;
+        }
+
+        // Some Unity versions do not include generated EXR assets in a player
+        // Resources build. Generate the same bounded wave packet at runtime so
+        // audio crests never silently disappear on the exhibition machine.
+        for (int packet = 0; packet < nativeWavePackets.Length; packet++)
+        {
+            if (nativeWavePackets[packet] != null)
+                continue;
+
+            const int size = 128;
+            Texture2D texture = new Texture2D(size, size, TextureFormat.RGBA32, true, true)
+            {
+                name = "Runtime Wave Packet " + packet,
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear
+            };
+            float angle = Mathf.Lerp(-0.42f, 0.42f, HashWavePacket(packet, 1));
+            Vector2 axis = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
+            Vector2 crossAxis = new Vector2(-axis.y, axis.x);
+            for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                Vector2 p = new Vector2(x / (float)(size - 1) - 0.5f, y / (float)(size - 1) - 0.5f) * 2f;
+                float along = Vector2.Dot(p, axis);
+                float across = Vector2.Dot(p, crossAxis);
+                float envelope = Mathf.Exp(-2.9f * along * along - 8.2f * across * across);
+                float crest = 0f;
+                for (int band = 0; band < 5; band++)
+                {
+                    float wavelength = Mathf.Lerp(0.18f, 0.52f, HashWavePacket(packet, 10 + band));
+                    float phase = HashWavePacket(packet, 20 + band) * Mathf.PI * 2f;
+                    float bandAngle = angle + Mathf.Lerp(-0.7f, 0.7f, HashWavePacket(packet, 30 + band));
+                    Vector2 direction = new Vector2(Mathf.Cos(bandAngle), Mathf.Sin(bandAngle));
+                    crest += Mathf.Sin(Vector2.Dot(p, direction) * Mathf.PI * 2f / wavelength + phase) *
+                        Mathf.Lerp(0.12f, 0.23f, HashWavePacket(packet, 40 + band));
+                }
+
+                float irregularity = Mathf.Lerp(0.78f, 1.16f,
+                    Mathf.PerlinNoise((p.x + packet * 0.37f) * 2.6f, (p.y - packet * 0.19f) * 2.6f));
+                float value = Mathf.Clamp01(Mathf.Max(0f, crest) * envelope * irregularity * 1.45f);
+                texture.SetPixel(x, y, new Color(value, value, value, 1f));
+            }
+            texture.Apply(true, false);
+            nativeWavePackets[packet] = texture;
+            generatedWavePackets = true;
+        }
+
+    }
+
+    static float HashWavePacket(int packet, int seed)
+    {
+        return Mathf.Repeat(Mathf.Sin((packet + 1) * 12.9898f + seed * 78.233f) * 43758.5453f, 1f);
+    }
+
     void SetupPulseDeformers()
     {
         if (!useLegacyWaterDeformer)
@@ -801,6 +959,8 @@ public class BreathToWater : MonoBehaviour
             return;
         }
 
+        EnsureWavePacketTextures();
+
         pulseSlots = new PulseSlot[Mathf.Max(1, pulsePoolSize)];
         pulseDeformerTemplate.amplitude = 0f;
         pulseDeformerTemplate.gameObject.SetActive(false);
@@ -809,8 +969,41 @@ public class BreathToWater : MonoBehaviour
         {
             GameObject obj = Instantiate(pulseDeformerTemplate.gameObject, pulseDeformerTemplate.transform.parent);
             obj.name = "Sound Traveling Pulse " + i;
+            WaterDeformer deformer = obj.GetComponent<WaterDeformer>();
+            // The scene template is a migrated ShoreWave material. Use the
+            // project WaterDecal graph for runtime audio packets so the texture
+            // is authored into HDRP's deformation atlas rather than the legacy
+            // shore-wave branch.
+            Material sourceMaterial = Resources.Load<Material>("AudioPulseDecal/Audio Pulse Deformer");
+            if (sourceMaterial == null)
+                sourceMaterial = deformer.material;
+            Material material = new Material(sourceMaterial) { name = "Positive Audio Crest " + i };
+            material.EnableKeyword("_AFFECTS_DEFORMATION");
+            material.DisableKeyword("_AFFECTS_FOAM");
+            material.DisableKeyword("_TYPE_SHORE_WAVE");
+            material.DisableKeyword("_TYPE_TEXTURE");
+            if (nativeWavePackets != null && nativeWavePackets.Length > 0)
+            {
+                material.SetTexture(WavePacketTextureProperty, nativeWavePackets[i % nativeWavePackets.Length]);
+                material.SetTexture("_Deformation_Texture", nativeWavePackets[i % nativeWavePackets.Length]);
+            }
+            material.SetFloat("_AffectDeformation", 1f);
+            material.SetFloat("_AffectFoam", 0f);
+            material.SetFloat("_AffectSimulationMask", 0f);
+            if (material.HasProperty("_TYPE"))
+                material.SetFloat("_TYPE", 4f);
+            if (material.HasProperty("_Remap_Min"))
+                material.SetFloat("_Remap_Min", 0f);
+            if (material.HasProperty("_Remap_Max"))
+                material.SetFloat("_Remap_Max", 1f);
+            deformer.material = material;
+            deformer.type = WaterDeformerType.Material;
+            deformer.resolution = new Vector2Int(128, 128);
+            deformer.updateMode = CustomRenderTextureUpdateMode.Realtime;
+            deformer.surfaceFoamDimmer = 0f;
+            deformer.deepFoamDimmer = 0f;
             obj.SetActive(false);
-            pulseSlots[i] = new PulseSlot { deformer = obj.GetComponent<WaterDeformer>() };
+            pulseSlots[i] = new PulseSlot { deformer = deformer, material = material };
         }
     }
 
@@ -831,9 +1024,7 @@ public class BreathToWater : MonoBehaviour
         }
 
         nativeWaveSlots = new NativeWaveSlot[Mathf.Max(1, nativeAudioWavePoolSize)];
-        nativeWavePackets = new Texture2D[4];
-        for (int i = 0; i < nativeWavePackets.Length; i++)
-            nativeWavePackets[i] = Resources.Load<Texture2D>("AudioPulseDecal/Packets/WavePacketV2_" + i);
+        EnsureWavePacketTextures();
         for (int i = 0; i < nativeWaveSlots.Length; i++)
         {
             GameObject obj = new GameObject("Audio Water Decal " + i);
@@ -918,6 +1109,86 @@ public class BreathToWater : MonoBehaviour
         lastPulseTime = Time.time;
     }
 
+    PulseSlot AcquirePulseSlot()
+    {
+        if (pulseSlots == null || pulseSlots.Length == 0)
+            return null;
+
+        for (int i = 0; i < pulseSlots.Length; i++)
+        {
+            if (!pulseSlots[i].active)
+                return pulseSlots[i];
+        }
+
+        return pulseSlots[0];
+    }
+
+    bool StartPulseSegment(Vector3 origin, Vector3 forward, Vector3 right, float strength,
+        float sizeVariation, bool nearShoulder)
+    {
+        PulseSlot slot = AcquirePulseSlot();
+        if (slot == null)
+            return false;
+
+        int packetCount = nativeWavePackets != null ? nativeWavePackets.Length : 0;
+        if (packetCount == 0)
+            return false;
+
+        int segmentSeed = pulseSequence * 2 + (nearShoulder ? 0 : 1);
+        float lateralJitter = Mathf.Lerp(-8f, 8f, Mathf.PerlinNoise(segmentSeed * 3.17f, 0.41f));
+        float forwardDistance;
+        if (nearShoulder)
+        {
+            // Put the shoulder close enough to occupy the lower image, then let it
+            // travel well past the start of the main crest. The overlap is what
+            // hides the old foreground/background seam.
+            forwardDistance = Mathf.Lerp(6f, 14f, Mathf.PerlinNoise(segmentSeed * 2.63f, 0.87f));
+            slot.start = origin + forward * forwardDistance + right * lateralJitter;
+            slot.end = slot.start + forward * Mathf.Lerp(82f, 110f, sizeVariation);
+            // A shorter depth and broad lateral span reads as a near crest instead
+            // of a flat rectangular patch, while the long travel path bridges into
+            // the middle distance.
+            slot.deformer.regionSize = new Vector2(nativeWaveWidth * 1.72f * sizeVariation,
+                nativeWaveLength * 1.02f * sizeVariation);
+            slot.widthScale = 1.72f;
+            slot.lengthScale = 1.02f;
+        }
+        else
+        {
+            // Start the main crest before the shoulder has faded out. Keep the
+            // path broad enough that successive events do not form evenly spaced
+            // isolated bands.
+            forwardDistance = Mathf.Lerp(34f, 72f,
+                Mathf.PerlinNoise(segmentSeed * 2.63f, 0.87f));
+            slot.start = origin + forward * forwardDistance + right * lateralJitter;
+            slot.end = slot.start + forward * Mathf.Lerp(64f, 92f, sizeVariation);
+            slot.deformer.regionSize = new Vector2(nativeWaveWidth * 1.34f * sizeVariation,
+                nativeWaveLength * 1.22f * sizeVariation);
+            slot.widthScale = 1.34f;
+            slot.lengthScale = 1.22f;
+        }
+
+        float waterY = water.transform.position.y;
+        slot.start.y = waterY;
+        slot.end.y = waterY;
+        slot.age = 0f;
+        slot.duration = nativeWaveLifetime * Mathf.Lerp(0.82f, 1.2f, sizeVariation);
+        slot.strength = Mathf.Clamp01(strength);
+        slot.scale = sizeVariation;
+        slot.textureIndex = (pulseSequence + (nearShoulder ? 0 : 1)) % packetCount;
+        slot.nearShoulder = nearShoulder;
+        slot.active = true;
+
+        slot.deformer.gameObject.SetActive(true);
+        slot.deformer.amplitude = 0f;
+        slot.deformer.transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
+        slot.deformer.transform.position = slot.start;
+        if (slot.material != null)
+            slot.material.SetTexture("_Deformation_Texture", nativeWavePackets[slot.textureIndex]);
+        slot.deformer.RequestUpdate();
+        return true;
+    }
+
     void StartTravelingPulse(float strength)
     {
         Vector3 forward = referenceCamera.forward;
@@ -932,7 +1203,6 @@ public class BreathToWater : MonoBehaviour
 
         // The authored template is stored below the scene water for editing; its
         // transform height is not the runtime surface height.
-        float waterY = water.transform.position.y;
         pulseSequence++;
         float lateralVariation = Mathf.Lerp(-22f, 22f, Mathf.PerlinNoise(pulseSequence * 1.37f, 0.23f));
         float sizeVariation = Mathf.Lerp(0.78f, 1.28f, Mathf.PerlinNoise(pulseSequence * 2.11f, 0.71f));
@@ -950,30 +1220,8 @@ public class BreathToWater : MonoBehaviour
         if (pulseSlots == null || pulseSlots.Length == 0)
             return;
 
-        PulseSlot slot = pulseSlots[0];
-        for (int i = 0; i < pulseSlots.Length; i++)
-        {
-            if (!pulseSlots[i].active)
-            {
-                slot = pulseSlots[i];
-                break;
-            }
-        }
-        slot.start = origin + forward * pulseNearDistance;
-        slot.end = origin + forward * pulseFarDistance;
-        slot.start.y = waterY;
-        slot.end.y = waterY;
-        slot.age = 0f;
-        slot.strength = Mathf.Max(0.12f, strength * 0.65f);
-        slot.active = true;
-
-        slot.deformer.gameObject.SetActive(true);
-        slot.deformer.amplitude = 0f;
-        slot.deformer.regionSize = new Vector2(pulseWidth * sizeVariation, pulseLength * sizeVariation);
-        slot.deformer.boxBlend = new Vector2(slot.deformer.regionSize.x * 0.92f, slot.deformer.regionSize.y * 0.92f);
-        slot.deformer.cubicBlend = true;
-        slot.deformer.transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
-        slot.deformer.transform.position = slot.start;
+        StartPulseSegment(origin, forward, right, strength * 0.94f, sizeVariation, true);
+        StartPulseSegment(origin, forward, right, strength, sizeVariation, false);
     }
 
     void StartNativeAudioWave(Vector3 origin, Vector3 forward, float sizeVariation, float strength)
@@ -993,7 +1241,13 @@ public class BreathToWater : MonoBehaviour
         slot.duration = nativeWaveLifetime * Mathf.Lerp(0.82f, 1.2f, sizeVariation);
         slot.strength = Mathf.Clamp01(strength);
         slot.scale = sizeVariation;
-        slot.textureIndex = pulseSequence % nativeWavePackets.Length;
+        int packetCount = nativeWavePackets != null ? nativeWavePackets.Length : 0;
+        if (packetCount == 0)
+        {
+            Debug.LogWarning("BreathToWater: Audio packet textures are unavailable; skipping this wave packet.");
+            return;
+        }
+        slot.textureIndex = pulseSequence % packetCount;
         // Each event is an independently phased, bounded wave group. It travels as a
         // group; its texture contains several oblique wavelengths rather than a ring.
         float lateralJitter = Mathf.Lerp(-8f, 8f, Mathf.PerlinNoise(pulseSequence * 3.17f, 0.41f));
@@ -1039,7 +1293,7 @@ public class BreathToWater : MonoBehaviour
                 continue;
 
             slot.age += Time.deltaTime;
-            float t = slot.age / Mathf.Max(0.01f, pulseTravelTime);
+            float t = slot.age / Mathf.Max(0.01f, slot.duration);
             if (t >= 1f)
             {
                 slot.deformer.amplitude = 0f;
@@ -1049,14 +1303,19 @@ public class BreathToWater : MonoBehaviour
             }
 
             float moveT = Mathf.SmoothStep(0f, 1f, t);
-            float fadeIn = Mathf.SmoothStep(0f, 0.1f, t);
-            float fadeOut = 1f - Mathf.SmoothStep(0.85f, 1f, t);
+            float fadeIn = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0f, 0.1f, t));
+            float fadeOut = 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.85f, 1f, t));
             float envelope = fadeIn * fadeOut;
-            float farBoost = Mathf.Lerp(1f, 1.15f, moveT);
             slot.deformer.transform.position = Vector3.Lerp(slot.start, slot.end, moveT);
-            slot.deformer.amplitude = Mathf.Min(maxPulseAmplitude, pulseAmplitude * slot.strength * envelope * farBoost);
-            slot.deformer.regionSize *= Mathf.Lerp(1f, 1.12f, Time.deltaTime);
-            slot.deformer.boxBlend = new Vector2(slot.deformer.regionSize.x * 0.92f, slot.deformer.regionSize.y * 0.92f);
+            float crestLimit = GetSegmentedCrestLift(slot.deformer.transform.position, slot.deformer.regionSize);
+            float requestedAmplitude = nativeWaveAmplitude * slot.strength * envelope *
+                (0.9f + 0.1f * Mathf.Sin(slot.age * 5.1f));
+            slot.deformer.amplitude = Mathf.Min(crestLimit, requestedAmplitude);
+            float breathing = 1f + 0.07f * Mathf.Sin((slot.age + slot.textureIndex) * 2.3f);
+            float widthScale = slot.widthScale > 0f ? slot.widthScale : (slot.nearShoulder ? 1.8f : 1f);
+            float lengthScale = slot.lengthScale > 0f ? slot.lengthScale : (slot.nearShoulder ? 1.8f : 1f);
+            slot.deformer.regionSize = new Vector2(nativeWaveWidth * widthScale * slot.scale * breathing,
+                nativeWaveLength * lengthScale * slot.scale * breathing);
             slot.deformer.RequestUpdate();
             pulseValue = Mathf.Max(pulseValue, envelope * slot.strength);
         }
@@ -1066,11 +1325,6 @@ public class BreathToWater : MonoBehaviour
     {
         if (nativeWaveSlots == null)
             return;
-
-        // Never allow a runtime F8 adjustment or a persisted value to lift a crest
-        // through the authored camera. The safety margin is intentionally zero here
-        // so the loud state can use the full available vertical range.
-        float cameraLiftLimit = GetCameraLiftLimit();
 
         for (int i = 0; i < nativeWaveSlots.Length; i++)
         {
@@ -1089,16 +1343,12 @@ public class BreathToWater : MonoBehaviour
                 continue;
             }
 
-            float envelope = Mathf.SmoothStep(0f, 0.18f, t) * (1f - Mathf.SmoothStep(0.72f, 1f, t));
+            float envelope = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0f, 0.18f, t)) *
+                (1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.72f, 1f, t)));
             float travel = Mathf.SmoothStep(0f, 1f, t);
             slot.decal.surfaceFoamDimmer = Mathf.Clamp01(slot.strength * envelope * 0.58f);
             slot.decal.deepFoamDimmer = 0f;
-            // Positive-only displacement preserves the raised shoreline clearance:
-            // a loud input adds a finite crest group rather than carving a trough
-            // that can expose the rocks under the authored water level.
-            float distanceFromCamera = Vector3.Distance(referenceCamera.position, slot.decal.transform.position);
-            float distanceBlend = Mathf.InverseLerp(nativeWaveSafeNearDistance, nativeWaveFullDistance, distanceFromCamera);
-            float spatialLiftLimit = Mathf.Lerp(cameraLiftLimit, maximumWaterDecalLift, distanceBlend);
+            float spatialLiftLimit = GetSegmentedCrestLift(slot.decal.transform.position, slot.decal.regionSize);
             slot.decal.amplitude = Mathf.Min(
                 spatialLiftLimit,
                 nativeWaveAmplitude * slot.strength * envelope * (0.9f + 0.1f * Mathf.Sin(slot.age * 5.1f)));
@@ -1118,6 +1368,33 @@ public class BreathToWater : MonoBehaviour
 
         float clearance = referenceCamera.position.y - water.transform.position.y;
         return Mathf.Max(0.2f, clearance);
+    }
+
+    float GetSegmentedCrestLift(Vector3 crestPosition, Vector2 crestRegionSize)
+    {
+        if (referenceCamera == null)
+            return maximumWaterDecalLift;
+
+        // Restrict each crest according to its closest edge. The high far-field
+        // wave therefore remains visible while a broad crest can never enter the
+        // fixed camera from outside the nominal safety distance.
+        Vector3 cameraToCrest = crestPosition - referenceCamera.position;
+        cameraToCrest.y = 0f;
+        float crestHalfExtent = Mathf.Max(crestRegionSize.x, crestRegionSize.y) * 0.5f;
+        float crestEdgeDistance = Mathf.Max(0f, cameraToCrest.magnitude - crestHalfExtent);
+        float cameraLiftLimit = GetCameraLiftLimit();
+        float farLiftLimit = Mathf.Max(0.2f, nativeWaveFarLift);
+        float midLiftLimit = Mathf.Min(farLiftLimit, nativeWaveMidLift);
+        if (crestEdgeDistance <= nativeWaveMidDistance)
+        {
+            float nearToMid = Mathf.SmoothStep(0f, 1f,
+                Mathf.InverseLerp(nativeWaveSafeNearDistance, nativeWaveMidDistance, crestEdgeDistance));
+            return Mathf.Lerp(cameraLiftLimit, midLiftLimit, nearToMid);
+        }
+
+        float midToFar = Mathf.SmoothStep(0f, 1f,
+            Mathf.InverseLerp(nativeWaveMidDistance, nativeWaveFullDistance, crestEdgeDistance));
+        return Mathf.Lerp(midLiftLimit, farLiftLimit, midToFar);
     }
 
     void UpdateSlowSwell(float baseWave)
@@ -1354,8 +1631,13 @@ public class BreathToWater : MonoBehaviour
         pulseAmplitude = DrawSlider("Distant crest amplitude", pulseAmplitude, 0f, 16f);
         maxPulseAmplitude = DrawSlider("Distant crest cap", maxPulseAmplitude, 0f, 16f);
         maximumLargeBandMultiplier = DrawSlider("Wave height cap", maximumLargeBandMultiplier, 0.1f, 6f);
-        nativeWaveAmplitude = DrawSlider("Loud crest amplitude", nativeWaveAmplitude, 0f, 25f);
-        maximumWaterDecalLift = DrawSlider("Crest lift cap", maximumWaterDecalLift, 0f, 25f);
+        GUILayout.Label("Segmented crest height");
+        nativeWaveAmplitude = DrawSlider("Loud crest request", nativeWaveAmplitude, 0f, 800f);
+        nativeWaveMidLift = DrawSlider("Mid-distance crest", nativeWaveMidLift, 0f, 800f);
+        nativeWaveFarLift = DrawSlider("Far-distance crest", nativeWaveFarLift, 0f, 800f);
+        nativeWaveSafeNearDistance = DrawSlider("Camera safety distance", nativeWaveSafeNearDistance, 0f, 120f);
+        nativeWaveMidDistance = DrawSlider("Mid-distance begins", nativeWaveMidDistance, 10f, 220f);
+        nativeWaveFullDistance = DrawSlider("Full-height distance", nativeWaveFullDistance, 20f, 300f);
 
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Save on this computer")) SaveRuntimeSettings();
@@ -1399,6 +1681,11 @@ public class BreathToWater : MonoBehaviour
         PlayerPrefs.SetFloat(PreferencesPrefix + "SafetyCap", maximumLargeBandMultiplier);
         PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveAmplitude", nativeWaveAmplitude);
         PlayerPrefs.SetFloat(PreferencesPrefix + "WaterDecalLift", maximumWaterDecalLift);
+        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveMidLift", nativeWaveMidLift);
+        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveFarLift", nativeWaveFarLift);
+        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveSafeDistance", nativeWaveSafeNearDistance);
+        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveMidDistance", nativeWaveMidDistance);
+        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveFullDistance", nativeWaveFullDistance);
         PlayerPrefs.Save();
         statusMessage = "Settings saved.";
     }
@@ -1419,6 +1706,11 @@ public class BreathToWater : MonoBehaviour
         maximumLargeBandMultiplier = PlayerPrefs.GetFloat(PreferencesPrefix + "SafetyCap", maximumLargeBandMultiplier);
         nativeWaveAmplitude = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveAmplitude", nativeWaveAmplitude);
         maximumWaterDecalLift = PlayerPrefs.GetFloat(PreferencesPrefix + "WaterDecalLift", maximumWaterDecalLift);
+        nativeWaveMidLift = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveMidLift", nativeWaveMidLift);
+        nativeWaveFarLift = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveFarLift", nativeWaveFarLift);
+        nativeWaveSafeNearDistance = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveSafeDistance", nativeWaveSafeNearDistance);
+        nativeWaveMidDistance = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveMidDistance", nativeWaveMidDistance);
+        nativeWaveFullDistance = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveFullDistance", nativeWaveFullDistance);
     }
 
     void OnDisable()
@@ -1426,12 +1718,20 @@ public class BreathToWater : MonoBehaviour
         StopMicrophone();
         if (exhibitionWaterMaterial != null)
             Destroy(exhibitionWaterMaterial);
-        if (nativeWaveSlots == null)
-            return;
+        if (nativeWaveSlots != null)
+            for (int i = 0; i < nativeWaveSlots.Length; i++)
+                if (nativeWaveSlots[i].material != null)
+                    Destroy(nativeWaveSlots[i].material);
 
-        for (int i = 0; i < nativeWaveSlots.Length; i++)
-            if (nativeWaveSlots[i].material != null)
-                Destroy(nativeWaveSlots[i].material);
+        if (pulseSlots != null)
+            for (int i = 0; i < pulseSlots.Length; i++)
+                if (pulseSlots[i].material != null)
+                    Destroy(pulseSlots[i].material);
+
+        if (generatedWavePackets && nativeWavePackets != null)
+            for (int i = 0; i < nativeWavePackets.Length; i++)
+                if (nativeWavePackets[i] != null && nativeWavePackets[i].name.StartsWith("Runtime Wave Packet"))
+                    Destroy(nativeWavePackets[i]);
 
         if (proceduralOceanMaterial != null)
             Destroy(proceduralOceanMaterial);
