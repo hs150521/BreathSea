@@ -110,7 +110,7 @@ public class BreathToWater : MonoBehaviour
 
     [Header("Water Safety")]
     [Tooltip("Upper displacement multiplier for the broad HDRP swell. Values above 1 are intentionally theatrical.")]
-    [Range(0.1f, 12f)] public float maximumLargeBandMultiplier = 6.2f;
+    [Range(0.1f, 12f)] public float maximumLargeBandMultiplier = 3.42f;
     [Tooltip("Temporarily hides authored shoreline rock and terrain renderers when the loud ocean covers them.")]
     public bool hideSubmergedBackdrop = true;
     [Range(0f, 1f)] public float rippleInfluence = 1f;
@@ -491,7 +491,7 @@ public class BreathToWater : MonoBehaviour
         nativeWaveLength = 34f;
         globalAttackSpeed = 0.32f;
         globalReleaseSpeed = 0.09f;
-        maximumLargeBandMultiplier = Mathf.Clamp(maximumLargeBandMultiplier, 5.5f, 6.4f);
+        maximumLargeBandMultiplier = Mathf.Clamp(maximumLargeBandMultiplier, 3.42f, 6.4f);
         calmDistantWindSpeed = 28f;
         calmFirstBand = 0.62f;
         calmSecondBand = 0.35f;
