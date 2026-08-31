@@ -1,5 +1,7 @@
 #pragma warning disable 0618
 
+using System.Collections.Generic;
+
 using UnityEngine;
 using UnityEngine.Rendering.HighDefinition;
 using UnityEngine.Rendering;
@@ -34,23 +36,13 @@ public class BreathToWater : MonoBehaviour
     [Tooltip("Each sound carries a small, non-uniform foam crest group across the water without retuning the entire FFT ocean.")]
     public bool useNativeAudioWaveDecals = false;
     [Range(1, 6)] public int nativeAudioWavePoolSize = 4;
-    [Tooltip("The peak displacement requested by a loud microphone-triggered crest group, in metres.")]
-    public float nativeWaveAmplitude = 44f;
+    [Tooltip("The peak displacement of a loud microphone-triggered crest group, in metres.")]
+    public float nativeWaveAmplitude = 8f;
     public float nativeWaveLifetime = 4.2f;
     public float nativeWaveNearDistance = 10f;
     public float nativeWaveFarDistance = 36f;
     public float nativeWaveWidth = 15f;
     public float nativeWaveLength = 13f;
-    [Tooltip("Horizontal distance from the closest edge of a crest where its height remains limited to the fixed camera clearance.")]
-    public float nativeWaveSafeNearDistance = 45f;
-    [Tooltip("Horizontal distance from the closest crest edge at which the middle-distance height is reached.")]
-    public float nativeWaveMidDistance = 110f;
-    [Tooltip("Horizontal distance from the closest crest edge at which the far-distance height is reached.")]
-    public float nativeWaveFullDistance = 180f;
-    [Tooltip("Maximum positive lift available to a crest in the middle distance.")]
-    public float nativeWaveMidLift = 18f;
-    [Tooltip("Maximum positive lift available only to the audio wave groups in the far distance.")]
-    public float nativeWaveFarLift = 44f;
 
     [Header("HDRP Current Variation")]
     [Tooltip("Adds slow, spatially varied flow to the same HDRP ocean spectrum. It never deforms the shoreline height field.")]
@@ -74,8 +66,8 @@ public class BreathToWater : MonoBehaviour
     public bool useRecordedOceanFallback = false;
 
     [Header("Shoreline Clearance")]
-    [Tooltip("Raises the water datum enough that the deepest exhibition trough cannot reveal submerged shore rocks.")]
-    [Range(0f, 0.5f)] public float waterDatumLift = 0.32f;
+    [Tooltip("Small artistic offset from the authored water level. Loud-state shoreline concealment is handled separately.")]
+    [Range(0f, 4f)] public float waterDatumLift = 0.32f;
 
 
     [Header("Audio Input")]
@@ -118,11 +110,9 @@ public class BreathToWater : MonoBehaviour
 
     [Header("Water Safety")]
     [Tooltip("Upper displacement multiplier for the broad HDRP swell. Values above 1 are intentionally theatrical.")]
-    [Range(0.1f, 6f)] public float maximumLargeBandMultiplier = 5f;
-    [Tooltip("Symmetric HDRP FFT waves create both crests and troughs. This cap keeps the broad trough above the authored seabed while local audio decals provide the tall positive crest.")]
-    [Range(0.5f, 3f)] public float maximumGlobalBandMultiplier = 1.35f;
-    [Tooltip("Cap for the secondary global band; local audio waves are not reduced by this value.")]
-    [Range(0.25f, 2f)] public float maximumGlobalSecondaryBandMultiplier = 1.05f;
+    [Range(0.1f, 12f)] public float maximumLargeBandMultiplier = 6.2f;
+    [Tooltip("Temporarily hides authored shoreline rock and terrain renderers when the loud ocean covers them.")]
+    public bool hideSubmergedBackdrop = true;
     [Range(0f, 1f)] public float rippleInfluence = 1f;
     [Range(0f, 1f)] public float foamInfluence = 0.75f;
 
@@ -135,7 +125,7 @@ public class BreathToWater : MonoBehaviour
     public bool disableStaticSceneDeformation = true;
     [Range(0f, 1f)] public float maximumWaterDecalDepression = 0.15f;
     [Tooltip("Positive lift cap for local audio wave decals, in metres.")]
-    [Range(0f, 50f)] public float maximumWaterDecalLift = 44f;
+    [Range(0f, 10f)] public float maximumWaterDecalLift = 9f;
 
     [Header("Exhibition Water Look")]
     [Tooltip("Applies a less directional, less mirror-like ocean treatment at runtime.")]
@@ -184,6 +174,8 @@ public class BreathToWater : MonoBehaviour
     public float rawMicLevel;
     public float peakMicLevel;
     public float maxRawMicLevel;
+    public float cameraWaterClearance;
+    public float cameraDatumCorrection;
 
     AudioClip micClip;
     float[] samples;
@@ -199,11 +191,7 @@ public class BreathToWater : MonoBehaviour
     Material nativeWaveMaterial;
     WaterDecal[] currentFlowDecals;
     Material currentFlowMaterial;
-    WaterDecal spectralOceanDeformer;
-    Material spectralOceanDeformerMaterial;
-    Texture2D spectralOceanHeightField;
     Texture2D[] nativeWavePackets;
-    bool generatedWavePackets;
     const string WavePacketTextureProperty = "_SampleTexture2D_b6ca83ee7a5744eda121f52ddeb1fa1d_Texture_1_Texture2D";
     GameObject proceduralOceanObject;
     Mesh proceduralOceanMesh;
@@ -214,6 +202,17 @@ public class BreathToWater : MonoBehaviour
     ContinuousOceanClipmap continuousOcean;
     GpuOceanSpectrum gpuOceanSpectrum;
     Material exhibitionWaterMaterial;
+    GameObject recordedOceanObject;
+    float authoredWaterY;
+    bool waterDatumInitialized;
+    Renderer[] submergedBackdropRenderers;
+    bool[] submergedBackdropStates;
+    Terrain[] submergedTerrains;
+    bool[] submergedTerrainHeightmapStates;
+    bool[] submergedTerrainFoliageStates;
+    bool submergedBackdropCached;
+    bool submergedBackdropHidden;
+    WaterSearchResult cameraWaterSearchResult;
 
     static readonly Vector2[] GerstnerDirections =
     {
@@ -227,15 +226,8 @@ public class BreathToWater : MonoBehaviour
     class PulseSlot
     {
         public WaterDeformer deformer;
-        public Material material;
         public float age;
-        public float duration;
         public float strength;
-        public float scale;
-        public float widthScale;
-        public float lengthScale;
-        public int textureIndex;
-        public bool nearShoulder;
         public Vector3 start;
         public Vector3 end;
         public bool active;
@@ -282,8 +274,10 @@ public class BreathToWater : MonoBehaviour
 
         ApplyLegacySafetyDefaults();
         LoadRuntimeSettings();
-        LiftWaterDatumForShoreline();
         ApplyExhibitionWaterLook();
+        LiftWaterDatumForShoreline();
+        CleanupRuntimeArtifacts();
+        RestoreContinuousOceanState();
         ConfigureWaterDecals();
         SetupNativeAudioWaveDecals();
         SetupSpatialCurrentVariation();
@@ -332,7 +326,6 @@ public class BreathToWater : MonoBehaviour
             UpdateTravelingPulses();
             UpdateNativeAudioWaveDecals();
             UpdateSlowSwell(delayedGlobalWave);
-            UpdateSpectralOceanDeformer(delayedGlobalWave);
             UpdateProceduralNearOcean(delayedGlobalWave);
         }
 
@@ -353,8 +346,9 @@ public class BreathToWater : MonoBehaviour
         else if (elapsedSeconds < 4.2f) input = 0.07f;
         else if (elapsedSeconds < 6.5f) input = 0.004f;
         else input = 0.028f;
-        // The stress harness must exercise the same local crest path as live audio;
-        // otherwise screenshots only verify the low-amplitude global FFT response.
+        // The harness must exercise the same continuous crest field as a real
+        // microphone session; otherwise captures only validate the low-energy FFT
+        // response and miss the loud-wave geometry we ship.
         ApplyInputLevel(input, input, deltaTime, true);
     }
 
@@ -377,49 +371,7 @@ public class BreathToWater : MonoBehaviour
         inputSource = InputSource.Simulator;
         simulationPattern = SimulationPattern.ExhibitionStressTest;
         simulatorStartTime = Time.time;
-        ResetRuntimeWaveState();
         statusMessage = "Simulator: ExhibitionStressTest";
-    }
-
-    void ResetRuntimeWaveState()
-    {
-        smoothedSound = 0f;
-        smoothedGlobalWave = 0f;
-        delayedGlobalWave = 0f;
-        breathValue = 0f;
-        waveValue = 0f;
-        pulseValue = 0f;
-        lastPulseTime = -999f;
-        pulseSequence = 0;
-
-        if (pulseSlots != null)
-        {
-            for (int i = 0; i < pulseSlots.Length; i++)
-            {
-                PulseSlot slot = pulseSlots[i];
-                slot.age = 0f;
-                if (slot.deformer != null)
-                {
-                    slot.deformer.amplitude = 0f;
-                    slot.deformer.RequestUpdate();
-                    slot.deformer.gameObject.SetActive(false);
-                }
-                slot.active = false;
-            }
-        }
-
-        if (nativeWaveSlots != null)
-        {
-            for (int i = 0; i < nativeWaveSlots.Length; i++)
-            {
-                NativeWaveSlot slot = nativeWaveSlots[i];
-                slot.age = 0f;
-                slot.decal.amplitude = 0f;
-                slot.decal.RequestUpdate();
-                slot.decal.gameObject.SetActive(false);
-                slot.active = false;
-            }
-        }
     }
 
     void SetupMicrophone()
@@ -505,22 +457,14 @@ public class BreathToWater : MonoBehaviour
 
         // The authored scene predates the exhibition preset, so enforce its safe response
         // here instead of depending on serialized inspector defaults.
-        // HDRP's standalone WaterDecal graph is visually too subtle at the
-        // exhibition camera. Reuse the proven deformation renderer, but feed it a
-        // positive-only height field so loud input cannot carve a deep trough.
+        pulseNearDistance = 20f;
+        pulseTravelTime = 10f;
+        pulseAmplitude = 0.45f;
+        maxPulseAmplitude = 0.5f;
+        pulseWidth = 118f;
+        pulseLength = 108f;
+        useLegacyWaterDeformer = false;
         useNativeAudioWaveDecals = false;
-        useLegacyWaterDeformer = true;
-        // Each audio event owns a broad near shoulder and a separate traveling
-        // crest. Keep enough slots for the four-event lifetime overlap.
-        pulsePoolSize = Mathf.Max(pulsePoolSize, 8);
-        pulseTravelTime = 4.2f;
-        nativeWaveNearDistance = 55f;
-        nativeWaveFarDistance = 90f;
-        nativeWaveAmplitude = Mathf.Max(nativeWaveAmplitude, 8f);
-        maximumWaterDecalLift = Mathf.Max(maximumWaterDecalLift, 9f);
-        nativeWaveWidth = 52f;
-        nativeWaveLength = 46f;
-        pulseCooldown = 1.2f;
         useProceduralNearOcean = false;
         // Keep one coherent HDRP spectrum. The former normal-map, static deformation,
         // and current-decal overlays each had an independent periodic domain; their
@@ -532,34 +476,22 @@ public class BreathToWater : MonoBehaviour
         // Water material so the reflection and micro-normal paths remain coupled to
         // the active simulation instead of to a duplicate graph asset.
         water.customMaterial = null;
-        // Loud inputs remain visibly strong, but leave clearance below the fixed camera.
+        // Loud inputs are intentionally exaggerated for the children's exhibition.
+        nativeWaveAmplitude = Mathf.Max(nativeWaveAmplitude, 8f);
+        maximumWaterDecalLift = Mathf.Max(maximumWaterDecalLift, 9f);
         responseCurve = Mathf.Max(responseCurve, 1.5f);
-        nativeWaveFarLift = Mathf.Clamp(Mathf.Max(nativeWaveFarLift, 7f), 7f, 12f);
-        nativeWaveAmplitude = Mathf.Clamp(Mathf.Max(nativeWaveAmplitude, 10f), 10f, 14f);
-        maximumWaterDecalLift = Mathf.Clamp(Mathf.Max(maximumWaterDecalLift, 12f), 12f, 18f);
-        // Keep the high positive crest in the middle distance. With the authored
-        // camera only about 1.75 m above the datum, a 20 m decal placed in the
-        // near field can fill the lens even though it is not a negative trough.
-        // Bring the first crest into the readable near field. Its tail overlaps
-        // the second crest, so the height envelope has no visible step at the
-        // foreground/middle-distance boundary.
-        nativeWaveNearDistance = 42f;
-        nativeWaveFarDistance = 108f;
-        nativeWaveSafeNearDistance = 6f;
-        nativeWaveMidDistance = 64f;
-        nativeWaveFullDistance = 140f;
-        nativeWaveMidLift = Mathf.Clamp(Mathf.Max(nativeWaveMidLift, 3.8f), 3.8f, 6f);
-        nativeWaveWidth = 46f;
-        nativeWaveLength = 36f;
-        // The authored 200 m decal region clips a crest before it reaches the
-        // deliberately safe middle/far distances. This is a simulation domain,
-        // not a camera or water-mesh setting.
-        water.decalRegionSize = new Vector2(560f, 440f);
+        // Do not lift the entire sea to compensate for a loud trough: that puts the
+        // fixed exhibition camera inside otherwise well-shaped crests. Rock and
+        // terrain renderers are concealed only while the loud state needs it.
+        waterDatumLift = Mathf.Clamp(waterDatumLift, 0f, 0.35f);
+        hideSubmergedBackdrop = true;
+        nativeWaveNearDistance = 10f;
+        nativeWaveFarDistance = 36f;
+        nativeWaveWidth = 42f;
+        nativeWaveLength = 34f;
         globalAttackSpeed = 0.32f;
         globalReleaseSpeed = 0.09f;
-        maximumLargeBandMultiplier = Mathf.Max(maximumLargeBandMultiplier, 5f);
-        maximumGlobalBandMultiplier = Mathf.Max(maximumGlobalBandMultiplier, 1.5f);
-        maximumGlobalSecondaryBandMultiplier = Mathf.Max(maximumGlobalSecondaryBandMultiplier, 1.35f);
+        maximumLargeBandMultiplier = Mathf.Clamp(maximumLargeBandMultiplier, 5.5f, 6.4f);
         calmDistantWindSpeed = 28f;
         calmFirstBand = 0.62f;
         calmSecondBand = 0.35f;
@@ -573,23 +505,26 @@ public class BreathToWater : MonoBehaviour
         // Keep the three HDRP bands in distinct jobs.  The swell is directional
         // enough to read as a body of water, the middle band gives it cross-seas,
         // and the ripples only resolve close to the viewer.
-        water.repetitionSize = 1850f;
+        // Use a long, shared FFT domain. The longer wavelengths make one coherent
+        // body of water across the full frame; the audio envelope changes its scale,
+        // not a finite decal patch.
+        water.repetitionSize = 3000f;
         water.largeOrientationValue = largeWaveDirection;
-        // The exhibition is a sheltered sunset view, not an open-water gale. A
-        // lower spectral peak avoids resolving into repeated cross-screen crests at
-        // the fixed camera while high chaos keeps the remaining waves directionally
-        // spread instead of forming one parade of parallel bands.
-        water.largeWindSpeed = 34f;
-        water.largeChaos = 0.92f;
+        water.largeWindSpeed = 50f;
+        // Enough spread to break a repeated sine profile, while the fixed main
+        // direction still gives the loud state one broad, readable sea front.
+        water.largeChaos = 0.68f;
         water.largeBand0FadeMode = WaterSurface.FadeMode.Custom;
-        water.largeBand0FadeStart = 560f;
-        water.largeBand0FadeDistance = 1280f;
+        // Let the broad swell build over a short, continuous distance. This keeps
+        // the near field readable instead of turning the fixed low camera into a
+        // vertical wall, while the same wave reaches full height in the middle sea.
+        water.largeBand0FadeStart = 55f;
+        water.largeBand0FadeDistance = 520f;
         water.largeBand1FadeMode = WaterSurface.FadeMode.Custom;
-        // The middle band is useful near the shore but becomes a row of parallel
-        // horizon stripes at this fixed low camera angle. Fade it before it reaches
-        // the far field; the large band then carries the distant sea state alone.
-        water.largeBand1FadeStart = 160f;
-        water.largeBand1FadeDistance = 420f;
+        // Keep the cross-sea band in the near and middle field. It breaks up the
+        // long swell without producing a second evenly spaced horizon.
+        water.largeBand1FadeStart = 150f;
+        water.largeBand1FadeDistance = 480f;
         water.ripples = true;
         water.ripplesMotionMode = WaterPropertyOverrideMode.Custom;
         water.ripplesOrientationValue = rippleDirection;
@@ -598,23 +533,22 @@ public class BreathToWater : MonoBehaviour
         water.ripplesFadeMode = WaterSurface.FadeMode.Custom;
         water.ripplesFadeStart = 38f;
         water.ripplesFadeDistance = 210f;
-        rippleInfluence = Mathf.Min(rippleInfluence, 0.85f);
+        rippleInfluence = Mathf.Min(rippleInfluence, 0.7f);
 
         // Runtime audio decals are spawned relative to the viewing camera. Keep HDRP's
         // finite decal simulation region centred on that camera so they reach the water.
         water.decalRegionAnchor = referenceCamera;
-        // Audio crests live in the middle distance; keep the HDRP atlas large
-        // enough to contain their full positive lift instead of silently dropping
-        // the far end of the wave path.
-        water.decalRegionSize = new Vector2(420f, 420f);
+        // The single spectral field spans the complete visible sea. Keeping the
+        // atlas at the old 240 m size would silently crop it into a local patch.
+        water.decalRegionSize = new Vector2(1900f, 1700f);
 
         HDAdditionalCameraData cameraData = referenceCamera.GetComponent<HDAdditionalCameraData>();
         if (cameraData != null)
             cameraData.antialiasing = HDAdditionalCameraData.AntialiasingMode.SubpixelMorphologicalAntiAliasing;
 
         // Broad highlights need roughness variation in this low-sun composition.
-        water.startSmoothness = 0.74f;
-        water.endSmoothness = 0.50f;
+        water.startSmoothness = 0.68f;
+        water.endSmoothness = 0.46f;
         water.smoothnessFadeStart = 35f;
         water.smoothnessFadeDistance = 350f;
 
@@ -631,35 +565,14 @@ public class BreathToWater : MonoBehaviour
         water.heightScattering = 0.38f;
         water.displacementScattering = 0.5f;
         water.maxTessellationFactor = Mathf.Max(water.maxTessellationFactor, 6);
-    }
-
-    void SetupSpectralOceanDeformer()
-    {
-        Material template = Resources.Load<Material>("AudioPulseDecal/Water Circle Deformer");
-        if (template == null)
-        {
-            Debug.LogError("BreathToWater: Spectral ocean deformer material is missing.");
-            return;
-        }
-
-        spectralOceanHeightField = BuildSpectralHeightField(256);
-        spectralOceanDeformerMaterial = new Material(template) { name = "Exhibition Spectral Ocean Deformer" };
-        spectralOceanDeformerMaterial.EnableKeyword("_AFFECTS_DEFORMATION");
-        spectralOceanDeformerMaterial.SetTexture(WavePacketTextureProperty, spectralOceanHeightField);
-
-        GameObject obj = new GameObject("Exhibition Spectral Ocean Deformer");
-        obj.transform.SetParent(transform, false);
-        obj.transform.position = new Vector3(referenceCamera.position.x, water.transform.position.y, referenceCamera.position.z + 620f);
-        WaterDecal decal = obj.AddComponent<WaterDecal>();
-        decal.material = spectralOceanDeformerMaterial;
-        decal.regionSize = new Vector2(1800f, 1600f);
-        decal.resolution = new Vector2Int(256, 256);
-        decal.updateMode = CustomRenderTextureUpdateMode.OnLoad;
-        decal.amplitude = 0.12f;
-        decal.surfaceFoamDimmer = 0f;
-        decal.deepFoamDimmer = 0f;
-        decal.RequestUpdate();
-        spectralOceanDeformer = decal;
+        water.scriptInteractions = true;
+        // HDRP's stock underwater volume uses the theoretical maximum wave height,
+        // not the current FFT sample. At this exhibition's intentionally high wind
+        // setting it flags the fixed camera as submerged even during a short peak,
+        // producing a flat waterline or a black frame.
+        water.underWater = false;
+        water.underWaterRefraction = false;
+        water.underWaterScatteringColor = new Color(0.015f, 0.20f, 0.24f, 1f);
     }
 
     void SetupGpuOceanDetail()
@@ -683,64 +596,16 @@ public class BreathToWater : MonoBehaviour
         water.customMaterial = exhibitionWaterMaterial;
     }
 
-    Texture2D BuildSpectralHeightField(int resolution)
-    {
-        Texture2D texture = new Texture2D(resolution, resolution, TextureFormat.RGBA32, false, true)
-        {
-            name = "Exhibition Spectral Height Field",
-            wrapMode = TextureWrapMode.Clamp,
-            filterMode = FilterMode.Bilinear
-        };
-
-        Color[] pixels = new Color[resolution * resolution];
-        Vector2[] directions =
-        {
-            new Vector2(0.90f, 0.43f), new Vector2(0.56f, 0.83f), new Vector2(-0.30f, 0.95f),
-            new Vector2(-0.86f, 0.51f), new Vector2(0.98f, -0.21f), new Vector2(0.32f, -0.95f),
-            new Vector2(-0.61f, -0.79f), new Vector2(0.12f, 0.99f)
-        };
-        float[] wavelengths = { 420f, 285f, 190f, 126f, 82f, 54f, 33f, 21f };
-        float[] weights = { 0.45f, 0.29f, 0.19f, 0.12f, 0.075f, 0.048f, 0.028f, 0.016f };
-        float[] phases = { 0.2f, 1.7f, 3.5f, 5.1f, 2.4f, 4.3f, 0.9f, 5.8f };
-
-        for (int y = 0; y < resolution; y++)
-        for (int x = 0; x < resolution; x++)
-        {
-            Vector2 position = new Vector2((x / (float)(resolution - 1) - 0.5f) * 1800f, (y / (float)(resolution - 1) - 0.5f) * 1600f);
-            float height = 0f;
-            for (int wave = 0; wave < directions.Length; wave++)
-            {
-                float phase = Vector2.Dot(position, directions[wave]) * (Mathf.PI * 2f / wavelengths[wave]) + phases[wave];
-                height += weights[wave] * Mathf.Sin(phase);
-            }
-
-            // A soft border prevents the finite deformation region from reading as a rectangle.
-            float edgeX = Mathf.SmoothStep(0f, 0.06f, x / (float)(resolution - 1)) * (1f - Mathf.SmoothStep(0.94f, 1f, x / (float)(resolution - 1)));
-            float edgeY = Mathf.SmoothStep(0f, 0.06f, y / (float)(resolution - 1)) * (1f - Mathf.SmoothStep(0.94f, 1f, y / (float)(resolution - 1)));
-            float normalized = Mathf.Clamp01(0.5f + height * 0.5f * edgeX * edgeY);
-            pixels[y * resolution + x] = new Color(normalized, normalized, normalized, 1f);
-        }
-
-        texture.SetPixels(pixels);
-        texture.Apply(false, true);
-        return texture;
-    }
-
-    void UpdateSpectralOceanDeformer(float seaState)
-    {
-        if (spectralOceanDeformer == null)
-            return;
-
-        spectralOceanDeformer.amplitude = Mathf.Lerp(0.08f, 0.22f, Mathf.SmoothStep(0f, 1f, seaState));
-    }
-
     void LiftWaterDatumForShoreline()
     {
-        if (waterDatumLift <= 0f)
-            return;
+        if (!waterDatumInitialized)
+        {
+            authoredWaterY = water.transform.position.y;
+            waterDatumInitialized = true;
+        }
 
         Vector3 position = water.transform.position;
-        position.y += waterDatumLift;
+        position.y = authoredWaterY + Mathf.Max(0f, waterDatumLift);
         water.transform.position = position;
     }
 
@@ -767,7 +632,7 @@ public class BreathToWater : MonoBehaviour
         peakInfluence = 0.45f;
         attackSpeed = 10f;
         releaseSpeed = 1.1f;
-        responseCurve = 0.75f;
+        responseCurve = 1.5f;
         pulseThreshold = 0.32f;
         pulseCooldown = 0.75f;
         slowSwellStrength = 0.12f;
@@ -860,89 +725,6 @@ public class BreathToWater : MonoBehaviour
         }
     }
 
-    void EnsureWavePacketTextures()
-    {
-        if (nativeWavePackets == null || nativeWavePackets.Length != 4)
-            nativeWavePackets = new Texture2D[4];
-
-        // The authored EXR packets are intentionally soft for the original sample
-        // scene. Generate the bounded, irregular packet at runtime for the exhibition
-        // path so the close crest keeps visible local contrast without changing the
-        // imported assets.
-        bool preferRuntimePackets = applyExhibitionWaterLook && useLegacyWaterDeformer;
-        bool missingPacket = false;
-        for (int i = 0; i < nativeWavePackets.Length; i++)
-        {
-            if (!preferRuntimePackets && nativeWavePackets[i] == null)
-                nativeWavePackets[i] = Resources.Load<Texture2D>("AudioPulseDecal/Packets/WavePacketV2_" + i);
-            missingPacket |= preferRuntimePackets || nativeWavePackets[i] == null;
-        }
-
-        if (preferRuntimePackets)
-        {
-            for (int i = 0; i < nativeWavePackets.Length; i++)
-                nativeWavePackets[i] = null;
-            missingPacket = true;
-        }
-
-        if (!missingPacket)
-        {
-            return;
-        }
-
-        // Some Unity versions do not include generated EXR assets in a player
-        // Resources build. Generate the same bounded wave packet at runtime so
-        // audio crests never silently disappear on the exhibition machine.
-        for (int packet = 0; packet < nativeWavePackets.Length; packet++)
-        {
-            if (nativeWavePackets[packet] != null)
-                continue;
-
-            const int size = 128;
-            Texture2D texture = new Texture2D(size, size, TextureFormat.RGBA32, true, true)
-            {
-                name = "Runtime Wave Packet " + packet,
-                wrapMode = TextureWrapMode.Clamp,
-                filterMode = FilterMode.Bilinear
-            };
-            float angle = Mathf.Lerp(-0.42f, 0.42f, HashWavePacket(packet, 1));
-            Vector2 axis = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle));
-            Vector2 crossAxis = new Vector2(-axis.y, axis.x);
-            for (int y = 0; y < size; y++)
-            for (int x = 0; x < size; x++)
-            {
-                Vector2 p = new Vector2(x / (float)(size - 1) - 0.5f, y / (float)(size - 1) - 0.5f) * 2f;
-                float along = Vector2.Dot(p, axis);
-                float across = Vector2.Dot(p, crossAxis);
-                float envelope = Mathf.Exp(-2.9f * along * along - 8.2f * across * across);
-                float crest = 0f;
-                for (int band = 0; band < 5; band++)
-                {
-                    float wavelength = Mathf.Lerp(0.18f, 0.52f, HashWavePacket(packet, 10 + band));
-                    float phase = HashWavePacket(packet, 20 + band) * Mathf.PI * 2f;
-                    float bandAngle = angle + Mathf.Lerp(-0.7f, 0.7f, HashWavePacket(packet, 30 + band));
-                    Vector2 direction = new Vector2(Mathf.Cos(bandAngle), Mathf.Sin(bandAngle));
-                    crest += Mathf.Sin(Vector2.Dot(p, direction) * Mathf.PI * 2f / wavelength + phase) *
-                        Mathf.Lerp(0.12f, 0.23f, HashWavePacket(packet, 40 + band));
-                }
-
-                float irregularity = Mathf.Lerp(0.78f, 1.16f,
-                    Mathf.PerlinNoise((p.x + packet * 0.37f) * 2.6f, (p.y - packet * 0.19f) * 2.6f));
-                float value = Mathf.Clamp01(Mathf.Max(0f, crest) * envelope * irregularity * 1.45f);
-                texture.SetPixel(x, y, new Color(value, value, value, 1f));
-            }
-            texture.Apply(true, false);
-            nativeWavePackets[packet] = texture;
-            generatedWavePackets = true;
-        }
-
-    }
-
-    static float HashWavePacket(int packet, int seed)
-    {
-        return Mathf.Repeat(Mathf.Sin((packet + 1) * 12.9898f + seed * 78.233f) * 43758.5453f, 1f);
-    }
-
     void SetupPulseDeformers()
     {
         if (!useLegacyWaterDeformer)
@@ -959,8 +741,6 @@ public class BreathToWater : MonoBehaviour
             return;
         }
 
-        EnsureWavePacketTextures();
-
         pulseSlots = new PulseSlot[Mathf.Max(1, pulsePoolSize)];
         pulseDeformerTemplate.amplitude = 0f;
         pulseDeformerTemplate.gameObject.SetActive(false);
@@ -969,41 +749,8 @@ public class BreathToWater : MonoBehaviour
         {
             GameObject obj = Instantiate(pulseDeformerTemplate.gameObject, pulseDeformerTemplate.transform.parent);
             obj.name = "Sound Traveling Pulse " + i;
-            WaterDeformer deformer = obj.GetComponent<WaterDeformer>();
-            // The scene template is a migrated ShoreWave material. Use the
-            // project WaterDecal graph for runtime audio packets so the texture
-            // is authored into HDRP's deformation atlas rather than the legacy
-            // shore-wave branch.
-            Material sourceMaterial = Resources.Load<Material>("AudioPulseDecal/Audio Pulse Deformer");
-            if (sourceMaterial == null)
-                sourceMaterial = deformer.material;
-            Material material = new Material(sourceMaterial) { name = "Positive Audio Crest " + i };
-            material.EnableKeyword("_AFFECTS_DEFORMATION");
-            material.DisableKeyword("_AFFECTS_FOAM");
-            material.DisableKeyword("_TYPE_SHORE_WAVE");
-            material.DisableKeyword("_TYPE_TEXTURE");
-            if (nativeWavePackets != null && nativeWavePackets.Length > 0)
-            {
-                material.SetTexture(WavePacketTextureProperty, nativeWavePackets[i % nativeWavePackets.Length]);
-                material.SetTexture("_Deformation_Texture", nativeWavePackets[i % nativeWavePackets.Length]);
-            }
-            material.SetFloat("_AffectDeformation", 1f);
-            material.SetFloat("_AffectFoam", 0f);
-            material.SetFloat("_AffectSimulationMask", 0f);
-            if (material.HasProperty("_TYPE"))
-                material.SetFloat("_TYPE", 4f);
-            if (material.HasProperty("_Remap_Min"))
-                material.SetFloat("_Remap_Min", 0f);
-            if (material.HasProperty("_Remap_Max"))
-                material.SetFloat("_Remap_Max", 1f);
-            deformer.material = material;
-            deformer.type = WaterDeformerType.Material;
-            deformer.resolution = new Vector2Int(128, 128);
-            deformer.updateMode = CustomRenderTextureUpdateMode.Realtime;
-            deformer.surfaceFoamDimmer = 0f;
-            deformer.deepFoamDimmer = 0f;
             obj.SetActive(false);
-            pulseSlots[i] = new PulseSlot { deformer = deformer, material = material };
+            pulseSlots[i] = new PulseSlot { deformer = obj.GetComponent<WaterDeformer>() };
         }
     }
 
@@ -1012,10 +759,7 @@ public class BreathToWater : MonoBehaviour
         if (!useNativeAudioWaveDecals)
             return;
 
-        // Use the standalone runtime material. The copied sample material keeps an
-        // invalid _AFFECTS_DEFORMATION keyword on DX11 and resolves to
-        // Hidden/InternalErrorShader in a player/editor build.
-        nativeWaveMaterial = Resources.Load<Material>("AudioPulseDecal/Audio Pulse Deformer");
+        nativeWaveMaterial = Resources.Load<Material>("AudioPulseDecal/Audio Foam Wave");
         if (nativeWaveMaterial == null)
         {
             Debug.LogError("BreathToWater: Audio pulse decal material is missing. Re-import the HDRP water decal samples.");
@@ -1024,16 +768,15 @@ public class BreathToWater : MonoBehaviour
         }
 
         nativeWaveSlots = new NativeWaveSlot[Mathf.Max(1, nativeAudioWavePoolSize)];
-        EnsureWavePacketTextures();
+        nativeWavePackets = new Texture2D[4];
+        for (int i = 0; i < nativeWavePackets.Length; i++)
+            nativeWavePackets[i] = Resources.Load<Texture2D>("AudioPulseDecal/Packets/WavePacketV2_" + i);
         for (int i = 0; i < nativeWaveSlots.Length; i++)
         {
             GameObject obj = new GameObject("Audio Water Decal " + i);
             obj.transform.SetParent(transform, false);
             WaterDecal decal = obj.AddComponent<WaterDecal>();
             Material slotMaterial = new Material(nativeWaveMaterial) { name = "Audio Wave Packet " + i };
-            slotMaterial.EnableKeyword("_AFFECTS_DEFORMATION");
-            if (nativeWavePackets[i] != null)
-                slotMaterial.SetTexture(WavePacketTextureProperty, nativeWavePackets[i]);
             // HDRP's sample graph has its own height limiter. Keep it in step with
             // the exhibition control rather than silently clamping a loud crest.
             slotMaterial.SetFloat("_Max_Amplitude", maximumWaterDecalLift);
@@ -1109,86 +852,6 @@ public class BreathToWater : MonoBehaviour
         lastPulseTime = Time.time;
     }
 
-    PulseSlot AcquirePulseSlot()
-    {
-        if (pulseSlots == null || pulseSlots.Length == 0)
-            return null;
-
-        for (int i = 0; i < pulseSlots.Length; i++)
-        {
-            if (!pulseSlots[i].active)
-                return pulseSlots[i];
-        }
-
-        return pulseSlots[0];
-    }
-
-    bool StartPulseSegment(Vector3 origin, Vector3 forward, Vector3 right, float strength,
-        float sizeVariation, bool nearShoulder)
-    {
-        PulseSlot slot = AcquirePulseSlot();
-        if (slot == null)
-            return false;
-
-        int packetCount = nativeWavePackets != null ? nativeWavePackets.Length : 0;
-        if (packetCount == 0)
-            return false;
-
-        int segmentSeed = pulseSequence * 2 + (nearShoulder ? 0 : 1);
-        float lateralJitter = Mathf.Lerp(-8f, 8f, Mathf.PerlinNoise(segmentSeed * 3.17f, 0.41f));
-        float forwardDistance;
-        if (nearShoulder)
-        {
-            // Put the shoulder close enough to occupy the lower image, then let it
-            // travel well past the start of the main crest. The overlap is what
-            // hides the old foreground/background seam.
-            forwardDistance = Mathf.Lerp(6f, 14f, Mathf.PerlinNoise(segmentSeed * 2.63f, 0.87f));
-            slot.start = origin + forward * forwardDistance + right * lateralJitter;
-            slot.end = slot.start + forward * Mathf.Lerp(82f, 110f, sizeVariation);
-            // A shorter depth and broad lateral span reads as a near crest instead
-            // of a flat rectangular patch, while the long travel path bridges into
-            // the middle distance.
-            slot.deformer.regionSize = new Vector2(nativeWaveWidth * 1.72f * sizeVariation,
-                nativeWaveLength * 1.02f * sizeVariation);
-            slot.widthScale = 1.72f;
-            slot.lengthScale = 1.02f;
-        }
-        else
-        {
-            // Start the main crest before the shoulder has faded out. Keep the
-            // path broad enough that successive events do not form evenly spaced
-            // isolated bands.
-            forwardDistance = Mathf.Lerp(34f, 72f,
-                Mathf.PerlinNoise(segmentSeed * 2.63f, 0.87f));
-            slot.start = origin + forward * forwardDistance + right * lateralJitter;
-            slot.end = slot.start + forward * Mathf.Lerp(64f, 92f, sizeVariation);
-            slot.deformer.regionSize = new Vector2(nativeWaveWidth * 1.34f * sizeVariation,
-                nativeWaveLength * 1.22f * sizeVariation);
-            slot.widthScale = 1.34f;
-            slot.lengthScale = 1.22f;
-        }
-
-        float waterY = water.transform.position.y;
-        slot.start.y = waterY;
-        slot.end.y = waterY;
-        slot.age = 0f;
-        slot.duration = nativeWaveLifetime * Mathf.Lerp(0.82f, 1.2f, sizeVariation);
-        slot.strength = Mathf.Clamp01(strength);
-        slot.scale = sizeVariation;
-        slot.textureIndex = (pulseSequence + (nearShoulder ? 0 : 1)) % packetCount;
-        slot.nearShoulder = nearShoulder;
-        slot.active = true;
-
-        slot.deformer.gameObject.SetActive(true);
-        slot.deformer.amplitude = 0f;
-        slot.deformer.transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
-        slot.deformer.transform.position = slot.start;
-        if (slot.material != null)
-            slot.material.SetTexture("_Deformation_Texture", nativeWavePackets[slot.textureIndex]);
-        slot.deformer.RequestUpdate();
-        return true;
-    }
-
     void StartTravelingPulse(float strength)
     {
         Vector3 forward = referenceCamera.forward;
@@ -1201,8 +864,7 @@ public class BreathToWater : MonoBehaviour
         right.y = 0f;
         right.Normalize();
 
-        // The authored template is stored below the scene water for editing; its
-        // transform height is not the runtime surface height.
+        float waterY = pulseDeformerTemplate != null ? pulseDeformerTemplate.transform.position.y : water.transform.position.y;
         pulseSequence++;
         float lateralVariation = Mathf.Lerp(-22f, 22f, Mathf.PerlinNoise(pulseSequence * 1.37f, 0.23f));
         float sizeVariation = Mathf.Lerp(0.78f, 1.28f, Mathf.PerlinNoise(pulseSequence * 2.11f, 0.71f));
@@ -1220,8 +882,30 @@ public class BreathToWater : MonoBehaviour
         if (pulseSlots == null || pulseSlots.Length == 0)
             return;
 
-        StartPulseSegment(origin, forward, right, strength * 0.94f, sizeVariation, true);
-        StartPulseSegment(origin, forward, right, strength, sizeVariation, false);
+        PulseSlot slot = pulseSlots[0];
+        for (int i = 0; i < pulseSlots.Length; i++)
+        {
+            if (!pulseSlots[i].active)
+            {
+                slot = pulseSlots[i];
+                break;
+            }
+        }
+        slot.start = origin + forward * pulseNearDistance;
+        slot.end = origin + forward * pulseFarDistance;
+        slot.start.y = waterY;
+        slot.end.y = waterY;
+        slot.age = 0f;
+        slot.strength = Mathf.Max(0.12f, strength * 0.65f);
+        slot.active = true;
+
+        slot.deformer.gameObject.SetActive(true);
+        slot.deformer.amplitude = 0f;
+        slot.deformer.regionSize = new Vector2(pulseWidth * sizeVariation, pulseLength * sizeVariation);
+        slot.deformer.boxBlend = new Vector2(slot.deformer.regionSize.x * 0.92f, slot.deformer.regionSize.y * 0.92f);
+        slot.deformer.cubicBlend = true;
+        slot.deformer.transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
+        slot.deformer.transform.position = slot.start;
     }
 
     void StartNativeAudioWave(Vector3 origin, Vector3 forward, float sizeVariation, float strength)
@@ -1241,23 +925,14 @@ public class BreathToWater : MonoBehaviour
         slot.duration = nativeWaveLifetime * Mathf.Lerp(0.82f, 1.2f, sizeVariation);
         slot.strength = Mathf.Clamp01(strength);
         slot.scale = sizeVariation;
-        int packetCount = nativeWavePackets != null ? nativeWavePackets.Length : 0;
-        if (packetCount == 0)
-        {
-            Debug.LogWarning("BreathToWater: Audio packet textures are unavailable; skipping this wave packet.");
-            return;
-        }
-        slot.textureIndex = pulseSequence % packetCount;
+        slot.textureIndex = pulseSequence % nativeWavePackets.Length;
         // Each event is an independently phased, bounded wave group. It travels as a
         // group; its texture contains several oblique wavelengths rather than a ring.
-        float lateralJitter = Mathf.Lerp(-8f, 8f, Mathf.PerlinNoise(pulseSequence * 3.17f, 0.41f));
+        float lateralJitter = Mathf.Lerp(-18f, 18f, Mathf.PerlinNoise(pulseSequence * 3.17f, 0.41f));
         Vector3 right = Vector3.Cross(Vector3.up, forward);
         // Keep theatrical crests in the near field where their vertical motion reads
         // clearly at the authored fixed camera angle.
-        // Place the tall part of the crest in the middle distance. A high wave there
-        // reads strongly against the horizon without physically intersecting the lens.
-        float forwardDistance = Mathf.Lerp(nativeWaveNearDistance, nativeWaveFarDistance,
-            Mathf.PerlinNoise(pulseSequence * 2.63f, 0.87f));
+        float forwardDistance = Mathf.Lerp(6f, 16f, Mathf.PerlinNoise(pulseSequence * 2.63f, 0.87f));
         slot.start = origin + forward * forwardDistance + right * lateralJitter;
         slot.end = slot.start + forward * Mathf.Lerp(10f, 24f, sizeVariation);
         slot.start.y = waterY;
@@ -1293,7 +968,7 @@ public class BreathToWater : MonoBehaviour
                 continue;
 
             slot.age += Time.deltaTime;
-            float t = slot.age / Mathf.Max(0.01f, slot.duration);
+            float t = slot.age / Mathf.Max(0.01f, pulseTravelTime);
             if (t >= 1f)
             {
                 slot.deformer.amplitude = 0f;
@@ -1303,20 +978,14 @@ public class BreathToWater : MonoBehaviour
             }
 
             float moveT = Mathf.SmoothStep(0f, 1f, t);
-            float fadeIn = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0f, 0.1f, t));
-            float fadeOut = 1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.85f, 1f, t));
+            float fadeIn = Mathf.SmoothStep(0f, 0.1f, t);
+            float fadeOut = 1f - Mathf.SmoothStep(0.85f, 1f, t);
             float envelope = fadeIn * fadeOut;
+            float farBoost = Mathf.Lerp(1f, 1.15f, moveT);
             slot.deformer.transform.position = Vector3.Lerp(slot.start, slot.end, moveT);
-            float crestLimit = GetSegmentedCrestLift(slot.deformer.transform.position, slot.deformer.regionSize);
-            float requestedAmplitude = nativeWaveAmplitude * slot.strength * envelope *
-                (0.9f + 0.1f * Mathf.Sin(slot.age * 5.1f));
-            slot.deformer.amplitude = Mathf.Min(crestLimit, requestedAmplitude);
-            float breathing = 1f + 0.07f * Mathf.Sin((slot.age + slot.textureIndex) * 2.3f);
-            float widthScale = slot.widthScale > 0f ? slot.widthScale : (slot.nearShoulder ? 1.8f : 1f);
-            float lengthScale = slot.lengthScale > 0f ? slot.lengthScale : (slot.nearShoulder ? 1.8f : 1f);
-            slot.deformer.regionSize = new Vector2(nativeWaveWidth * widthScale * slot.scale * breathing,
-                nativeWaveLength * lengthScale * slot.scale * breathing);
-            slot.deformer.RequestUpdate();
+            slot.deformer.amplitude = Mathf.Min(maxPulseAmplitude, pulseAmplitude * slot.strength * envelope * farBoost);
+            slot.deformer.regionSize *= Mathf.Lerp(1f, 1.12f, Time.deltaTime);
+            slot.deformer.boxBlend = new Vector2(slot.deformer.regionSize.x * 0.92f, slot.deformer.regionSize.y * 0.92f);
             pulseValue = Mathf.Max(pulseValue, envelope * slot.strength);
         }
     }
@@ -1343,14 +1012,15 @@ public class BreathToWater : MonoBehaviour
                 continue;
             }
 
-            float envelope = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0f, 0.18f, t)) *
-                (1f - Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.72f, 1f, t)));
+            float envelope = Mathf.SmoothStep(0f, 0.18f, t) * (1f - Mathf.SmoothStep(0.72f, 1f, t));
             float travel = Mathf.SmoothStep(0f, 1f, t);
             slot.decal.surfaceFoamDimmer = Mathf.Clamp01(slot.strength * envelope * 0.58f);
             slot.decal.deepFoamDimmer = 0f;
-            float spatialLiftLimit = GetSegmentedCrestLift(slot.decal.transform.position, slot.decal.regionSize);
+            // Positive-only displacement preserves the raised shoreline clearance:
+            // a loud input adds a finite crest group rather than carving a trough
+            // that can expose the rocks under the authored water level.
             slot.decal.amplitude = Mathf.Min(
-                spatialLiftLimit,
+                maximumWaterDecalLift,
                 nativeWaveAmplitude * slot.strength * envelope * (0.9f + 0.1f * Mathf.Sin(slot.age * 5.1f)));
             slot.material.SetFloat("_Max_Amplitude", maximumWaterDecalLift);
             slot.decal.transform.position = Vector3.Lerp(slot.start, slot.end, travel);
@@ -1359,42 +1029,6 @@ public class BreathToWater : MonoBehaviour
             slot.decal.RequestUpdate();
             pulseValue = Mathf.Max(pulseValue, envelope * slot.strength);
         }
-    }
-
-    float GetCameraLiftLimit()
-    {
-        if (referenceCamera == null || water == null)
-            return maximumWaterDecalLift;
-
-        float clearance = referenceCamera.position.y - water.transform.position.y;
-        return Mathf.Max(0.2f, clearance);
-    }
-
-    float GetSegmentedCrestLift(Vector3 crestPosition, Vector2 crestRegionSize)
-    {
-        if (referenceCamera == null)
-            return maximumWaterDecalLift;
-
-        // Restrict each crest according to its closest edge. The high far-field
-        // wave therefore remains visible while a broad crest can never enter the
-        // fixed camera from outside the nominal safety distance.
-        Vector3 cameraToCrest = crestPosition - referenceCamera.position;
-        cameraToCrest.y = 0f;
-        float crestHalfExtent = Mathf.Max(crestRegionSize.x, crestRegionSize.y) * 0.5f;
-        float crestEdgeDistance = Mathf.Max(0f, cameraToCrest.magnitude - crestHalfExtent);
-        float cameraLiftLimit = GetCameraLiftLimit();
-        float farLiftLimit = Mathf.Max(0.2f, nativeWaveFarLift);
-        float midLiftLimit = Mathf.Min(farLiftLimit, nativeWaveMidLift);
-        if (crestEdgeDistance <= nativeWaveMidDistance)
-        {
-            float nearToMid = Mathf.SmoothStep(0f, 1f,
-                Mathf.InverseLerp(nativeWaveSafeNearDistance, nativeWaveMidDistance, crestEdgeDistance));
-            return Mathf.Lerp(cameraLiftLimit, midLiftLimit, nearToMid);
-        }
-
-        float midToFar = Mathf.SmoothStep(0f, 1f,
-            Mathf.InverseLerp(nativeWaveMidDistance, nativeWaveFullDistance, crestEdgeDistance));
-        return Mathf.Lerp(midLiftLimit, farLiftLimit, midToFar);
     }
 
     void UpdateSlowSwell(float baseWave)
@@ -1414,20 +1048,132 @@ public class BreathToWater : MonoBehaviour
         // Keep the largest wavelength below the point where a low exhibition camera
         // turns it into an evenly spaced stripe pattern. Audio energy remains clear
         // in the middle band, foam, and changing reflection instead.
-        // HDRP FFT displacement is bipolar: multiplying it for a taller crest also
-        // deepens the opposite trough. Keep the broad spectrum bounded so it cannot
-        // uncover the authored rocks; the positive-only audio decals carry the loud,
-        // theatrical height independently.
-        float broadBandCap = Mathf.Min(maximumLargeBandMultiplier, maximumGlobalBandMultiplier);
-        float secondaryBandCap = Mathf.Min(3.4f, maximumGlobalSecondaryBandMultiplier);
-        water.largeBand0Multiplier = Mathf.Lerp(0.30f, broadBandCap, seaState);
-        water.largeBand1Multiplier = Mathf.Lerp(0.18f, secondaryBandCap, seaState);
-        water.timeMultiplier = 0.86f;
-        water.simulationFoamAmount = Mathf.Lerp(0.16f, 0.48f, Mathf.Clamp01(seaState * foamInfluence));
+        // Keep the saturated voice state as a broad swell rather than allowing the
+        // bipolar FFT to lift the near field into a wall directly in front of the lens.
+        float broadState = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(seaState * 1.08f));
+        // Keep the authored datum stable. The FFT must remain free to form high,
+        // wide crests without translating the entire water body into the camera.
+        float heldState = Mathf.SmoothStep(0f, 1f, delayedWave);
+        Vector3 datumPosition = water.transform.position;
+        datumPosition.y = authoredWaterY + waterDatumLift - cameraDatumCorrection;
+        water.transform.position = datumPosition;
+        water.largeBand0Multiplier = Mathf.Lerp(0.34f, maximumLargeBandMultiplier, broadState);
+        // The primary band carries the long, continuous crest. Keeping the second
+        // swell band restrained prevents a loud voice from turning the sea into
+        // a field of equally prominent, round water hills.
+        water.largeBand1Multiplier = Mathf.Lerp(0.16f, 0.44f, broadState);
+        water.timeMultiplier = Mathf.Lerp(0.82f, 1.08f, broadState);
+        water.simulationFoamAmount = Mathf.Lerp(0.16f, 0.64f, Mathf.Clamp01(seaState * foamInfluence));
+        KeepCrestInFrontOfCamera();
+        UpdateSubmergedBackdropVisibility(heldState);
         if (continuousOcean != null)
             continuousOcean.audioEnergy = seaState;
         if (gpuOceanSpectrum != null)
             gpuOceanSpectrum.audioEnergy = seaState;
+    }
+
+    void KeepCrestInFrontOfCamera()
+    {
+        WaterSearchParameters search = new WaterSearchParameters
+        {
+            targetPositionWS = referenceCamera.position,
+            startPositionWS = cameraWaterSearchResult.candidateLocationWS,
+            error = 0.05f,
+            maxIterations = 8,
+            includeDeformation = false,
+            excludeSimulation = false,
+            outputNormal = false
+        };
+
+        if (!water.ProjectPointOnWaterSurface(search, out cameraWaterSearchResult))
+            return;
+
+        const float minimumClearance = 0.28f;
+        float sampledHeight = cameraWaterSearchResult.projectedPositionWS.y;
+        float uncorrectedHeight = sampledHeight + cameraDatumCorrection;
+        float requiredCorrection = Mathf.Clamp(
+            uncorrectedHeight - (referenceCamera.position.y - minimumClearance), 0f, 8f);
+        float correctionSpeed = requiredCorrection > cameraDatumCorrection ? 18f : 0.6f;
+        cameraDatumCorrection = Mathf.MoveTowards(
+            cameraDatumCorrection, requiredCorrection, correctionSpeed * Time.deltaTime);
+
+        Vector3 position = water.transform.position;
+        position.y = authoredWaterY + waterDatumLift - cameraDatumCorrection;
+        water.transform.position = position;
+        cameraWaterClearance = referenceCamera.position.y - (uncorrectedHeight - cameraDatumCorrection);
+    }
+
+    void UpdateSubmergedBackdropVisibility(float heldState)
+    {
+        if (!hideSubmergedBackdrop)
+            return;
+
+        bool shouldHide = heldState > 0.10f;
+        if (shouldHide == submergedBackdropHidden)
+            return;
+
+        CacheSubmergedBackdropRenderers();
+        for (int i = 0; i < submergedBackdropRenderers.Length; i++)
+        {
+            if (submergedBackdropRenderers[i] != null)
+                submergedBackdropRenderers[i].enabled = shouldHide ? false : submergedBackdropStates[i];
+        }
+        for (int i = 0; i < submergedTerrains.Length; i++)
+        {
+            if (submergedTerrains[i] == null)
+                continue;
+            submergedTerrains[i].drawHeightmap = shouldHide ? false : submergedTerrainHeightmapStates[i];
+            submergedTerrains[i].drawTreesAndFoliage = shouldHide ? false : submergedTerrainFoliageStates[i];
+        }
+
+        submergedBackdropHidden = shouldHide;
+    }
+
+    void CacheSubmergedBackdropRenderers()
+    {
+        if (submergedBackdropCached)
+            return;
+
+        Renderer[] renderers = FindObjectsByType<Renderer>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+        System.Collections.Generic.List<Renderer> backdrop = new System.Collections.Generic.List<Renderer>();
+        System.Collections.Generic.List<bool> states = new System.Collections.Generic.List<bool>();
+        for (int i = 0; i < renderers.Length; i++)
+        {
+            Renderer renderer = renderers[i];
+            if (renderer == null || renderer.transform.IsChildOf(transform) || renderer.GetComponentInParent<WaterSurface>() != null)
+                continue;
+            if (!IsShorelineBackdrop(renderer.transform))
+                continue;
+
+            backdrop.Add(renderer);
+            states.Add(renderer.enabled);
+        }
+
+        submergedBackdropRenderers = backdrop.ToArray();
+        submergedBackdropStates = states.ToArray();
+        submergedTerrains = FindObjectsByType<Terrain>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+        submergedTerrainHeightmapStates = new bool[submergedTerrains.Length];
+        submergedTerrainFoliageStates = new bool[submergedTerrains.Length];
+        for (int i = 0; i < submergedTerrains.Length; i++)
+        {
+            submergedTerrainHeightmapStates[i] = submergedTerrains[i].drawHeightmap;
+            submergedTerrainFoliageStates[i] = submergedTerrains[i].drawTreesAndFoliage;
+        }
+        submergedBackdropCached = true;
+        Debug.Log("BreathToWater: cached " + submergedBackdropRenderers.Length + " shoreline renderers and " + submergedTerrains.Length + " terrains for loud-water occlusion.");
+    }
+
+    static bool IsShorelineBackdrop(Transform candidate)
+    {
+        for (Transform current = candidate; current != null; current = current.parent)
+        {
+            string name = current.name;
+            if (name.IndexOf("rock", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("terrain", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        }
+
+        return false;
     }
 
     void SetupProceduralNearOcean()
@@ -1514,6 +1260,73 @@ public class BreathToWater : MonoBehaviour
         continuousOcean.enabled = true;
     }
 
+    void RestoreContinuousOceanState()
+    {
+        // A runtime-added clipmap can survive an editor play-session restart while
+        // its previous Water Surface takeover is still in memory. Restore the
+        // authored renderer before selecting the current exhibition path.
+        if (useContinuousOceanReplacement)
+            return;
+
+        ContinuousOceanClipmap staleClipmap = GetComponent<ContinuousOceanClipmap>();
+        if (staleClipmap != null)
+            staleClipmap.enabled = false;
+
+        water.enabled = true;
+        water.geometryType = WaterGeometryType.Infinite;
+        water.customMaterial = null;
+        // The authored scene contains dozens of legacy WaterDecals. Their finite
+        // atlas regions are the source of the old rectangular/strip artifacts; the
+        // exhibition wave is the native FFT spectrum, so keep decal deformation off.
+        water.deformation = false;
+        continuousOcean = null;
+    }
+
+    void CleanupRuntimeArtifacts()
+    {
+        // Enter Play Mode can keep runtime-created objects alive when scene reload is
+        // disabled. Remove only objects owned by this controller or the known
+        // unparented video fallback; authored scene objects are left untouched.
+        List<GameObject> owned = new List<GameObject>();
+        for (int i = 0; i < transform.childCount; i++)
+        {
+            GameObject child = transform.GetChild(i).gameObject;
+            if (IsRuntimeArtifact(child.name))
+                owned.Add(child);
+        }
+
+        string[] globalNames = { "Exhibition Recorded Ocean" };
+        for (int i = 0; i < globalNames.Length; i++)
+        {
+            GameObject candidate = GameObject.Find(globalNames[i]);
+            if (candidate != null && !owned.Contains(candidate))
+                owned.Add(candidate);
+        }
+
+        ContinuousOceanClipmap staleClipmap = GetComponent<ContinuousOceanClipmap>();
+        if (staleClipmap != null)
+        {
+            staleClipmap.enabled = false;
+            Destroy(staleClipmap);
+        }
+
+        for (int i = 0; i < owned.Count; i++)
+            Destroy(owned[i]);
+
+        recordedOceanObject = null;
+        proceduralOceanObject = null;
+        proceduralOceanMesh = null;
+        continuousOcean = null;
+    }
+
+    static bool IsRuntimeArtifact(string objectName)
+    {
+        return objectName.StartsWith("Audio Water Decal", System.StringComparison.Ordinal) ||
+               objectName.StartsWith("Sound Traveling Pulse", System.StringComparison.Ordinal) ||
+               objectName.StartsWith("High Wave Front", System.StringComparison.Ordinal) ||
+               objectName.StartsWith("Exhibition ", System.StringComparison.Ordinal);
+    }
+
     void SetupRecordedOceanFallback()
     {
         if (!useRecordedOceanFallback)
@@ -1525,6 +1338,8 @@ public class BreathToWater : MonoBehaviour
 
         GameObject videoSurface = GameObject.CreatePrimitive(PrimitiveType.Quad);
         videoSurface.name = "Exhibition Recorded Ocean";
+        videoSurface.transform.SetParent(transform, false);
+        recordedOceanObject = videoSurface;
         RealOceanVideoSurface recordedOcean = videoSurface.AddComponent<RealOceanVideoSurface>();
         recordedOcean.videoFileName = "kuriats-ocean-surface.mp4";
         recordedOcean.referenceCamera = referenceCamera;
@@ -1628,16 +1443,9 @@ public class BreathToWater : MonoBehaviour
         releaseSpeed = DrawSlider("Return speed", releaseSpeed, 0.1f, 5f);
         responseCurve = DrawSlider("Wave curve", responseCurve, 0.3f, 2f);
         pulseThreshold = DrawSlider("Pulse threshold", pulseThreshold, 0.05f, 1f);
-        pulseAmplitude = DrawSlider("Distant crest amplitude", pulseAmplitude, 0f, 16f);
-        maxPulseAmplitude = DrawSlider("Distant crest cap", maxPulseAmplitude, 0f, 16f);
-        maximumLargeBandMultiplier = DrawSlider("Wave height cap", maximumLargeBandMultiplier, 0.1f, 6f);
-        GUILayout.Label("Segmented crest height");
-        nativeWaveAmplitude = DrawSlider("Loud crest request", nativeWaveAmplitude, 0f, 800f);
-        nativeWaveMidLift = DrawSlider("Mid-distance crest", nativeWaveMidLift, 0f, 800f);
-        nativeWaveFarLift = DrawSlider("Far-distance crest", nativeWaveFarLift, 0f, 800f);
-        nativeWaveSafeNearDistance = DrawSlider("Camera safety distance", nativeWaveSafeNearDistance, 0f, 120f);
-        nativeWaveMidDistance = DrawSlider("Mid-distance begins", nativeWaveMidDistance, 10f, 220f);
-        nativeWaveFullDistance = DrawSlider("Full-height distance", nativeWaveFullDistance, 20f, 300f);
+        maximumLargeBandMultiplier = DrawSlider("Wave height cap", maximumLargeBandMultiplier, 0.1f, 12f);
+        waterDatumLift = DrawSlider("Shoreline lift", waterDatumLift, 0f, 4f);
+        LiftWaterDatumForShoreline();
 
         GUILayout.BeginHorizontal();
         if (GUILayout.Button("Save on this computer")) SaveRuntimeSettings();
@@ -1676,16 +1484,10 @@ public class BreathToWater : MonoBehaviour
         PlayerPrefs.SetFloat(PreferencesPrefix + "Release", releaseSpeed);
         PlayerPrefs.SetFloat(PreferencesPrefix + "Curve", responseCurve);
         PlayerPrefs.SetFloat(PreferencesPrefix + "PulseThreshold", pulseThreshold);
-        PlayerPrefs.SetFloat(PreferencesPrefix + "PulseAmplitude", pulseAmplitude);
-        PlayerPrefs.SetFloat(PreferencesPrefix + "MaxPulseAmplitude", maxPulseAmplitude);
         PlayerPrefs.SetFloat(PreferencesPrefix + "SafetyCap", maximumLargeBandMultiplier);
+        PlayerPrefs.SetFloat(PreferencesPrefix + "WaterDatumLift", waterDatumLift);
         PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveAmplitude", nativeWaveAmplitude);
         PlayerPrefs.SetFloat(PreferencesPrefix + "WaterDecalLift", maximumWaterDecalLift);
-        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveMidLift", nativeWaveMidLift);
-        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveFarLift", nativeWaveFarLift);
-        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveSafeDistance", nativeWaveSafeNearDistance);
-        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveMidDistance", nativeWaveMidDistance);
-        PlayerPrefs.SetFloat(PreferencesPrefix + "NativeWaveFullDistance", nativeWaveFullDistance);
         PlayerPrefs.Save();
         statusMessage = "Settings saved.";
     }
@@ -1701,16 +1503,10 @@ public class BreathToWater : MonoBehaviour
         releaseSpeed = PlayerPrefs.GetFloat(PreferencesPrefix + "Release", releaseSpeed);
         responseCurve = PlayerPrefs.GetFloat(PreferencesPrefix + "Curve", responseCurve);
         pulseThreshold = PlayerPrefs.GetFloat(PreferencesPrefix + "PulseThreshold", pulseThreshold);
-        pulseAmplitude = PlayerPrefs.GetFloat(PreferencesPrefix + "PulseAmplitude", pulseAmplitude);
-        maxPulseAmplitude = PlayerPrefs.GetFloat(PreferencesPrefix + "MaxPulseAmplitude", maxPulseAmplitude);
         maximumLargeBandMultiplier = PlayerPrefs.GetFloat(PreferencesPrefix + "SafetyCap", maximumLargeBandMultiplier);
+        waterDatumLift = PlayerPrefs.GetFloat(PreferencesPrefix + "WaterDatumLift", waterDatumLift);
         nativeWaveAmplitude = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveAmplitude", nativeWaveAmplitude);
         maximumWaterDecalLift = PlayerPrefs.GetFloat(PreferencesPrefix + "WaterDecalLift", maximumWaterDecalLift);
-        nativeWaveMidLift = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveMidLift", nativeWaveMidLift);
-        nativeWaveFarLift = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveFarLift", nativeWaveFarLift);
-        nativeWaveSafeNearDistance = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveSafeDistance", nativeWaveSafeNearDistance);
-        nativeWaveMidDistance = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveMidDistance", nativeWaveMidDistance);
-        nativeWaveFullDistance = PlayerPrefs.GetFloat(PreferencesPrefix + "NativeWaveFullDistance", nativeWaveFullDistance);
     }
 
     void OnDisable()
@@ -1723,15 +1519,8 @@ public class BreathToWater : MonoBehaviour
                 if (nativeWaveSlots[i].material != null)
                     Destroy(nativeWaveSlots[i].material);
 
-        if (pulseSlots != null)
-            for (int i = 0; i < pulseSlots.Length; i++)
-                if (pulseSlots[i].material != null)
-                    Destroy(pulseSlots[i].material);
-
-        if (generatedWavePackets && nativeWavePackets != null)
-            for (int i = 0; i < nativeWavePackets.Length; i++)
-                if (nativeWavePackets[i] != null && nativeWavePackets[i].name.StartsWith("Runtime Wave Packet"))
-                    Destroy(nativeWavePackets[i]);
+        if (recordedOceanObject != null)
+            Destroy(recordedOceanObject);
 
         if (proceduralOceanMaterial != null)
             Destroy(proceduralOceanMaterial);
@@ -1739,5 +1528,24 @@ public class BreathToWater : MonoBehaviour
             Destroy(proceduralOceanMesh);
         if (proceduralOceanObject != null)
             Destroy(proceduralOceanObject);
+
+        if (water != null && waterDatumInitialized)
+        {
+            Vector3 position = water.transform.position;
+            position.y = authoredWaterY;
+            water.transform.position = position;
+        }
+
+        if (submergedBackdropRenderers != null && submergedBackdropStates != null)
+            for (int i = 0; i < submergedBackdropRenderers.Length; i++)
+                if (submergedBackdropRenderers[i] != null)
+                    submergedBackdropRenderers[i].enabled = submergedBackdropStates[i];
+        if (submergedTerrains != null && submergedTerrainHeightmapStates != null && submergedTerrainFoliageStates != null)
+            for (int i = 0; i < submergedTerrains.Length; i++)
+                if (submergedTerrains[i] != null)
+                {
+                    submergedTerrains[i].drawHeightmap = submergedTerrainHeightmapStates[i];
+                    submergedTerrains[i].drawTreesAndFoliage = submergedTerrainFoliageStates[i];
+                }
     }
 }

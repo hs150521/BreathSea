@@ -163,8 +163,9 @@ public static class ExhibitionStressTestRunner
             GpuOceanSpectrum spectrum = Object.FindFirstObjectByType<GpuOceanSpectrum>();
             if (controller != null)
                 Debug.Log(string.Format(
-                    "Stress capture {0}: input={1:F4}, wave={2:F3}, delayed={3:F3}, gpu={4:F3}",
+                    "Stress capture {0}: input={1:F4}, wave={2:F3}, delayed={3:F3}, clearance={4:F2}, correction={5:F2}, gpu={6:F3}",
                     fileName, controller.rawMicLevel, controller.waveValue, controller.delayedGlobalWave,
+                    controller.cameraWaterClearance, controller.cameraDatumCorrection,
                     spectrum != null ? spectrum.audioEnergy : -1f));
         }
         finally
