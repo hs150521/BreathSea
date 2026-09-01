@@ -1,12 +1,22 @@
 # BreathSea
 
-![ScreenShot1](Pics/ScreenShot1.png)
+![BreathSea at Shanghai Little Bridge School](Pics/Shanghai-Little-Bridge-School.png)
+
+![Real-time wave response](Pics/Shanghai-Little-Bridge-School.gif)
 
 **BreathSea** is the Unity program developed for the interactive installation **Upside-down World**.
 
 **Upside-down World** is an in-person interactive artwork about memory, attention, and the unstable rhythm of the inner world. The audience sits inside a circular beach-like space, breathes toward a microphone, and watches a sunset ocean scene respond on screen. A soft breath keeps the sea calm. A stronger breath creates larger waves and can send a wave pulse forward across the water.
 
 This repository contains the Unity project for the real-time ocean interaction.
+
+## Exhibition at Shanghai Little Bridge School
+
+This release preserves the fixed exhibition viewpoint and the real-time water
+simulation. Microphone input is analysed continuously: quieter input keeps the
+surface gentle, while stronger input increases the height, motion, and foam of
+the waves. The images above were captured from the Windows Player build used
+for this exhibition.
 
 ---
 
@@ -42,15 +52,21 @@ Recommended exhibition setup:
 - A laptop or desktop with a GPU capable of running HDRP water, clouds, lighting, bloom, and high-resolution output
 - A working microphone
 
+## Runtime Controls
+
+- Press `F8` to open or close the exhibition control panel. It shows the active
+  microphone, live input level, and the calibration and wave-response settings.
+- Use the panel to switch microphones and tune thresholds without rebuilding
+  the project.
+- Press `F9` to run the built-in simulated audio stress test when no microphone
+  is available.
+
 ---
 
 ## Future Development
 
 Possible future improvements include:
 
-- A hidden calibration panel for exhibition setup
-- A config file for tuning breath and wave parameters without rebuilding
-- Better noise filtering for real exhibition environments
 - More local wave variation across the sea surface
 - Detection of breathing rhythm, inhale, and exhale patterns
 - Weather or sky changes in response to stronger sound
