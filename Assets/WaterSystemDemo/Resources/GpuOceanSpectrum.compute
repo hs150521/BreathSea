@@ -1,0 +1,43 @@
+#pragma kernel CSMain
+
+RWTexture2D<float4> _NormalFoam;
+int _Resolution;
+float _TimeValue;
+float _Energy;
+float2 _WorldOffset;
+
+float Wave(float2 p, float2 d, float wavelength, float amplitude, float speed, float phase, inout float2 gradient)
+{
+    float k = 6.2831853 / wavelength;
+    float angle = dot(p, d) * k + _TimeValue * speed + phase;
+    float c = cos(angle);
+    gradient += d * (amplitude * k * c);
+    return amplitude * sin(angle);
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Resolution || id.y >= (uint)_Resolution)
+        return;
+
+    float2 uv = (id.xy + 0.5) / _Resolution;
+    float2 p = (uv - 0.5) * float2(420.0, 420.0) + _WorldOffset;
+    float2 gradient = 0.0;
+    float seaState = lerp(0.68, 1.12, saturate(_Energy));
+    float height = 0.0;
+
+    height += Wave(p, normalize(float2(0.84, 0.55)), 82.0, 0.42 * seaState, 0.82, 0.21, gradient);
+    height += Wave(p, normalize(float2(-0.31, 0.95)), 57.0, 0.30 * seaState, 1.06, 2.47, gradient);
+    height += Wave(p, normalize(float2(0.69, -0.72)), 38.0, 0.20 * seaState, 1.29, 4.18, gradient);
+    height += Wave(p, normalize(float2(-0.93, 0.37)), 25.0, 0.13 * seaState, 1.61, 1.13, gradient);
+    height += Wave(p, normalize(float2(0.18, 0.98)), 16.0, 0.085 * seaState, 1.94, 5.36, gradient);
+    height += Wave(p, normalize(float2(-0.58, -0.81)), 10.0, 0.052 * seaState, 2.34, 3.41, gradient);
+    height += Wave(p, normalize(float2(0.97, -0.25)), 6.4, 0.030 * seaState, 2.91, 0.74, gradient);
+    height += Wave(p, normalize(float2(-0.08, 1.0)), 4.1, 0.018 * seaState, 3.48, 4.82, gradient);
+
+    float3 normal = normalize(float3(-gradient.x * 0.65, 1.0, -gradient.y * 0.65));
+    // HDRP Lit decodes runtime normal maps as BC5/DXT5nm: R and G are
+    // tangent-space X/Y while alpha must stay at one for the BC5 path.
+    _NormalFoam[id.xy] = float4(normal.x * 0.5 + 0.5, normal.z * 0.5 + 0.5, 0.0, 1.0);
+}
