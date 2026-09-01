@@ -1,8 +1,8 @@
 # BreathSea
 
-![BreathSea at Shanghai Little Bridge School](Pics/Shanghai-Little-Bridge-School.png)
+![Calm sea at Shanghai Little Bridge School](Pics/Shanghai-Little-Bridge-School.png)
 
-![Real-time wave response](Pics/Shanghai-Little-Bridge-School.gif)
+![Real-time wave response at Shanghai Little Bridge School](Pics/Shanghai-Little-Bridge-School.gif)
 
 **BreathSea** is the Unity program developed for the interactive installation **Upside-down World**.
 
